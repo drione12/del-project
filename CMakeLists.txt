@@ -10,16 +10,17 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(EverythingClone
+add_executable(EverythingClone WIN32
     src/main.cpp
     src/ntfs_index.cpp
     src/usn_watcher.cpp
     src/privileges.cpp
     src/volume_utils.cpp
     src/text_match.cpp
+    src/app.rc
 )
 
-target_link_libraries(EverythingClone PRIVATE advapi32)
+target_link_libraries(EverythingClone PRIVATE advapi32 comctl32 shell32)
 
 # Without these, TEXT()-based macros (e.g. SE_BACKUP_NAME) resolve to the
 # narrow (char*) charset while every API call in this project uses the
