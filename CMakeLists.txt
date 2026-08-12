@@ -22,6 +22,11 @@ add_executable(EverythingClone WIN32
 
 target_link_libraries(EverythingClone PRIVATE advapi32 comctl32 shell32)
 
+# MSVC's linker auto-generates and embeds its own default manifest; without
+# disabling that, it collides with the manifest app.rc embeds explicitly
+# (CVTRES fatal error CVT1100: duplicate resource, type:MANIFEST).
+target_link_options(EverythingClone PRIVATE "/MANIFEST:NO")
+
 # Without these, TEXT()-based macros (e.g. SE_BACKUP_NAME) resolve to the
 # narrow (char*) charset while every API call in this project uses the
 # explicit wide (...W) entry points - keep them consistent.
