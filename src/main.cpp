@@ -4,14 +4,17 @@
 #include <shellapi.h>
 #include <winioctl.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include <functional>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
+#include <wchar.h>
 
 #include "ntfs_index.h"
 #include "privileges.h"
@@ -32,6 +35,47 @@ std::atomic<bool> g_running{true};
 HWND g_searchBox = nullptr;
 HWND g_status = nullptr;
 HWND g_resultsView = nullptr;
+int g_sortColumn = 0;  // 0 = Name, 1 = Path
+bool g_sortAscending = true;
+
+void SplitNameAndDir(const std::wstring& fullPath, std::wstring& name, std::wstring& dir) {
+    size_t pos = fullPath.find_last_of(L'\\');
+    if (pos == std::wstring::npos) {
+        name = fullPath;
+        dir.clear();
+    } else {
+        name = fullPath.substr(pos + 1);
+        dir = fullPath.substr(0, pos);
+    }
+}
+
+void SortResults() {
+    std::sort(g_results.begin(), g_results.end(), [](const std::wstring& a, const std::wstring& b) {
+        std::wstring ka = a, kb = b;
+        if (g_sortColumn == 0) {
+            std::wstring dirA, dirB;
+            SplitNameAndDir(a, ka, dirA);
+            SplitNameAndDir(b, kb, dirB);
+        }
+        int cmp = _wcsicmp(ka.c_str(), kb.c_str());
+        return g_sortAscending ? cmp < 0 : cmp > 0;
+    });
+}
+
+void UpdateSortHeaderIndicator() {
+    HWND header = ListView_GetHeader(g_resultsView);
+    int count = Header_GetItemCount(header);
+    for (int i = 0; i < count; i++) {
+        HDITEMW hdi{};
+        hdi.mask = HDI_FORMAT;
+        Header_GetItem(header, i, &hdi);
+        hdi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+        if (i == g_sortColumn) {
+            hdi.fmt |= g_sortAscending ? HDF_SORTUP : HDF_SORTDOWN;
+        }
+        Header_SetItem(header, i, &hdi);
+    }
+}
 
 std::vector<std::wstring> SearchAll(const std::wstring& query) {
     std::vector<std::wstring> results;
@@ -53,6 +97,7 @@ void RunSearch() {
     wchar_t buf[1024];
     GetWindowTextW(g_searchBox, buf, 1024);
     g_results = SearchAll(buf);
+    SortResults();
 
     ListView_SetItemCountEx(g_resultsView, g_results.size(), LVSICF_NOSCROLL);
     InvalidateRect(g_resultsView, nullptr, FALSE);
@@ -114,9 +159,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             LVCOLUMNW col{};
             col.mask = LVCF_TEXT | LVCF_WIDTH;
-            col.cx = 580;
-            col.pszText = const_cast<LPWSTR>(L"경로 (더블클릭하면 열림)");
+            col.cx = 220;
+            col.pszText = const_cast<LPWSTR>(L"이름");
             ListView_InsertColumn(g_resultsView, 0, &col);
+
+            col.cx = 360;
+            col.pszText = const_cast<LPWSTR>(L"경로");
+            ListView_InsertColumn(g_resultsView, 1, &col);
 
             std::thread(IndexingThread, hwnd).detach();
             return 0;
@@ -126,7 +175,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             MoveWindow(g_status, 8, 8, w - 16, 20, TRUE);
             MoveWindow(g_searchBox, 8, 32, w - 16, 26, TRUE);
             MoveWindow(g_resultsView, 8, 64, w - 16, h - 72, TRUE);
-            ListView_SetColumnWidth(g_resultsView, 0, w - 16 - 20);
+            int totalW = w - 16 - 20;  // minus scrollbar allowance
+            ListView_SetColumnWidth(g_resultsView, 0, totalW * 35 / 100);
+            ListView_SetColumnWidth(g_resultsView, 1, totalW * 65 / 100);
             return 0;
         }
         case kMsgIndexReady: {
@@ -157,14 +208,115 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int i = di->item.iItem;
                 if ((di->item.mask & LVIF_TEXT) && i >= 0 &&
                     static_cast<size_t>(i) < g_results.size()) {
-                    wcsncpy_s(di->item.pszText, di->item.cchTextMax, g_results[i].c_str(),
-                              _TRUNCATE);
+                    std::wstring name, dir;
+                    SplitNameAndDir(g_results[i], name, dir);
+                    const std::wstring& text = (di->item.iSubItem == 0) ? name : dir;
+                    wcsncpy_s(di->item.pszText, di->item.cchTextMax, text.c_str(), _TRUNCATE);
                 }
             } else if (hdr->code == NM_DBLCLK) {
                 auto* nm = reinterpret_cast<NMITEMACTIVATE*>(lParam);
                 if (nm->iItem >= 0 && static_cast<size_t>(nm->iItem) < g_results.size()) {
                     ShellExecuteW(nullptr, L"open", g_results[nm->iItem].c_str(), nullptr,
                                   nullptr, SW_SHOWNORMAL);
+                }
+            } else if (hdr->code == LVN_COLUMNCLICK) {
+                auto* nmlv = reinterpret_cast<NMLISTVIEW*>(lParam);
+                if (g_sortColumn == nmlv->iSubItem) {
+                    g_sortAscending = !g_sortAscending;
+                } else {
+                    g_sortColumn = nmlv->iSubItem;
+                    g_sortAscending = true;
+                }
+                SortResults();
+                UpdateSortHeaderIndicator();
+                InvalidateRect(g_resultsView, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_CONTEXTMENU: {
+            if (reinterpret_cast<HWND>(wParam) != g_resultsView) break;
+
+            int selected = ListView_GetNextItem(g_resultsView, -1, LVNI_SELECTED);
+            if (selected < 0 || static_cast<size_t>(selected) >= g_results.size()) return 0;
+            const std::wstring path = g_results[selected];
+
+            int x = static_cast<int>(static_cast<short>(LOWORD(lParam)));
+            int y = static_cast<int>(static_cast<short>(HIWORD(lParam)));
+            if (x == -1 && y == -1) {
+                POINT pt;
+                GetCursorPos(&pt);
+                x = pt.x;
+                y = pt.y;
+            }
+
+            HMENU menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING, 1, L"열기");
+            AppendMenuW(menu, MF_STRING, 2, L"포함 폴더 열기");
+            AppendMenuW(menu, MF_STRING, 3, L"경로 복사");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(menu, MF_STRING, 4, L"삭제");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(menu, MF_STRING, 5, L"속성");
+
+            // SetForegroundWindow + the WM_NULL nudge afterward is the documented fix for
+            // the popup not dismissing correctly when the user clicks outside it.
+            SetForegroundWindow(hwnd);
+            int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, hwnd, nullptr);
+            PostMessage(hwnd, WM_NULL, 0, 0);
+            DestroyMenu(menu);
+
+            switch (cmd) {
+                case 1:
+                    ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    break;
+                case 2: {
+                    std::wstring arg = L"/select,\"" + path + L"\"";
+                    ShellExecuteW(nullptr, L"open", L"explorer.exe", arg.c_str(), nullptr,
+                                  SW_SHOWNORMAL);
+                    break;
+                }
+                case 3: {
+                    if (OpenClipboard(hwnd)) {
+                        EmptyClipboard();
+                        size_t bytes = (path.size() + 1) * sizeof(wchar_t);
+                        HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+                        if (mem) {
+                            void* dst = GlobalLock(mem);
+                            memcpy(dst, path.c_str(), bytes);
+                            GlobalUnlock(mem);
+                            SetClipboardData(CF_UNICODETEXT, mem);
+                        }
+                        CloseClipboard();
+                    }
+                    break;
+                }
+                case 4: {
+                    std::wstring msg = L"다음을 삭제하시겠습니까?\n\n" + path;
+                    if (MessageBoxW(hwnd, msg.c_str(), L"삭제 확인", MB_YESNO | MB_ICONWARNING) ==
+                        IDYES) {
+                        std::wstring doubleNull = path + L'\0';
+                        SHFILEOPSTRUCTW op{};
+                        op.hwnd = hwnd;
+                        op.wFunc = FO_DELETE;
+                        op.pFrom = doubleNull.c_str();
+                        op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION;
+                        SHFileOperationW(&op);
+                        g_results.erase(g_results.begin() + selected);
+                        ListView_SetItemCountEx(g_resultsView, g_results.size(), LVSICF_NOSCROLL);
+                        InvalidateRect(g_resultsView, nullptr, FALSE);
+                    }
+                    break;
+                }
+                case 5: {
+                    SHELLEXECUTEINFOW sei{};
+                    sei.cbSize = sizeof(sei);
+                    sei.fMask = SEE_MASK_INVOKEIDLIST;
+                    sei.hwnd = hwnd;
+                    sei.lpVerb = L"properties";
+                    sei.lpFile = path.c_str();
+                    sei.nShow = SW_SHOWNORMAL;
+                    ShellExecuteExW(&sei);
+                    break;
                 }
             }
             return 0;
