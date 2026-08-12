@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wchar.h>
+#include <string>
 
 std::vector<wchar_t> DetectNtfsFixedDrives() {
     std::vector<wchar_t> drives;
