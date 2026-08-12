@@ -2,7 +2,7 @@
 
 #include <cstdio>
 
-#include "text_match.h"
+#include "query.h"
 
 namespace {
 constexpr size_t kEnumBufferSize = 64 * 1024;
@@ -142,22 +142,24 @@ void NtfsIndex::ApplyUsnRecord(const USN_RECORD* record) {
     }
 }
 
-std::vector<std::wstring> NtfsIndex::Search(const std::wstring& query, size_t maxResults) const {
+std::vector<std::wstring> NtfsIndex::Search(const std::wstring& queryText,
+                                             size_t maxResults) const {
     std::vector<std::wstring> results;
-    if (query.empty()) return results;
+    if (queryText.empty()) return results;
 
-    std::wstring lowerQuery = ToLower(query);
-    bool hasWildcard = lowerQuery.find(L'*') != std::wstring::npos ||
-                        lowerQuery.find(L'?') != std::wstring::npos;
+    Query query = ParseQuery(queryText);
+    if (query.groups.empty()) return results;
 
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& [frn, entry] : records_) {
-        std::wstring lowerName = ToLower(entry.name);
-        bool matched = hasWildcard ? WildcardMatch(lowerName, lowerQuery)
-                                    : lowerName.find(lowerQuery) != std::wstring::npos;
-        if (!matched) continue;
-
-        results.push_back(ResolvePathLocked(frn));
+        if (query.options.matchPath) {
+            std::wstring path = ResolvePathLocked(frn);
+            if (!MatchesQuery(query, entry.name, path, entry.attributes)) continue;
+            results.push_back(path);
+        } else {
+            if (!MatchesQuery(query, entry.name, std::wstring(), entry.attributes)) continue;
+            results.push_back(ResolvePathLocked(frn));
+        }
         if (results.size() >= maxResults) break;
     }
     return results;

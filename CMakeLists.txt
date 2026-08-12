@@ -17,6 +17,7 @@ add_executable(EverythingClone WIN32
     src/privileges.cpp
     src/volume_utils.cpp
     src/text_match.cpp
+    src/query.cpp
     src/app.rc
 )
 
