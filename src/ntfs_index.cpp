@@ -157,9 +157,9 @@ void NtfsIndex::ApplyUsnRecord(const USN_RECORD* record) {
     }
 }
 
-std::vector<std::wstring> NtfsIndex::Search(const std::wstring& queryText,
+std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText,
                                              size_t maxResults) const {
-    std::vector<std::wstring> results;
+    std::vector<SearchResult> results;
     if (queryText.empty()) return results;
 
     Query query = ParseQuery(queryText);
@@ -167,14 +167,15 @@ std::vector<std::wstring> NtfsIndex::Search(const std::wstring& queryText,
 
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& [frn, entry] : records_) {
+        std::wstring path;
         if (query.options.matchPath) {
-            std::wstring path = ResolvePathLocked(frn);
+            path = ResolvePathLocked(frn);
             if (!MatchesQuery(query, entry.name, path, entry.attributes)) continue;
-            results.push_back(path);
         } else {
             if (!MatchesQuery(query, entry.name, std::wstring(), entry.attributes)) continue;
-            results.push_back(ResolvePathLocked(frn));
+            path = ResolvePathLocked(frn);
         }
+        results.push_back({path, entry.size, entry.modifiedTime, entry.attributes});
         if (results.size() >= maxResults) break;
     }
     return results;

@@ -30,12 +30,12 @@ constexpr UINT kMsgIndexReady = WM_APP + 1;
 constexpr size_t kMaxResults = 2000;
 
 std::vector<std::unique_ptr<NtfsIndex>> g_volumes;
-std::vector<std::wstring> g_results;
+std::vector<SearchResult> g_results;
 std::atomic<bool> g_running{true};
 HWND g_searchBox = nullptr;
 HWND g_status = nullptr;
 HWND g_resultsView = nullptr;
-int g_sortColumn = 0;  // 0 = Name, 1 = Path
+int g_sortColumn = 0;  // 0 = Name, 1 = Path, 2 = Size, 3 = Date modified
 bool g_sortAscending = true;
 
 void SplitNameAndDir(const std::wstring& fullPath, std::wstring& name, std::wstring& dir) {
@@ -49,17 +49,65 @@ void SplitNameAndDir(const std::wstring& fullPath, std::wstring& name, std::wstr
     }
 }
 
+std::wstring FormatSize(uint64_t bytes, bool isDirectory) {
+    if (isDirectory) return L"";
+    const wchar_t* units[] = {L"bytes", L"KB", L"MB", L"GB", L"TB"};
+    double size = static_cast<double>(bytes);
+    int unitIndex = 0;
+    while (size >= 1024.0 && unitIndex < 4) {
+        size /= 1024.0;
+        unitIndex++;
+    }
+    wchar_t buf[64];
+    if (unitIndex == 0) {
+        swprintf_s(buf, L"%llu %s", static_cast<unsigned long long>(bytes), units[0]);
+    } else {
+        swprintf_s(buf, L"%.1f %s", size, units[unitIndex]);
+    }
+    return buf;
+}
+
+std::wstring FormatFileTime(uint64_t fileTimeValue) {
+    if (fileTimeValue == 0) return L"";
+
+    FILETIME ft;
+    ft.dwLowDateTime = static_cast<DWORD>(fileTimeValue & 0xFFFFFFFFu);
+    ft.dwHighDateTime = static_cast<DWORD>(fileTimeValue >> 32);
+
+    FILETIME localFt;
+    if (!FileTimeToLocalFileTime(&ft, &localFt)) return L"";
+
+    SYSTEMTIME st;
+    if (!FileTimeToSystemTime(&localFt, &st)) return L"";
+
+    wchar_t buf[64];
+    swprintf_s(buf, L"%04d-%02d-%02d %02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour,
+               st.wMinute);
+    return buf;
+}
+
 void SortResults() {
-    std::sort(g_results.begin(), g_results.end(), [](const std::wstring& a, const std::wstring& b) {
-        std::wstring ka = a, kb = b;
-        if (g_sortColumn == 0) {
-            std::wstring dirA, dirB;
-            SplitNameAndDir(a, ka, dirA);
-            SplitNameAndDir(b, kb, dirB);
-        }
-        int cmp = _wcsicmp(ka.c_str(), kb.c_str());
-        return g_sortAscending ? cmp < 0 : cmp > 0;
-    });
+    std::sort(g_results.begin(), g_results.end(),
+               [](const SearchResult& a, const SearchResult& b) {
+                   switch (g_sortColumn) {
+                       case 2:
+                           return g_sortAscending ? a.size < b.size : a.size > b.size;
+                       case 3:
+                           return g_sortAscending ? a.modifiedTime < b.modifiedTime
+                                                   : a.modifiedTime > b.modifiedTime;
+                       case 0: {
+                           std::wstring na, nb, dirA, dirB;
+                           SplitNameAndDir(a.path, na, dirA);
+                           SplitNameAndDir(b.path, nb, dirB);
+                           int cmp = _wcsicmp(na.c_str(), nb.c_str());
+                           return g_sortAscending ? cmp < 0 : cmp > 0;
+                       }
+                       default: {
+                           int cmp = _wcsicmp(a.path.c_str(), b.path.c_str());
+                           return g_sortAscending ? cmp < 0 : cmp > 0;
+                       }
+                   }
+               });
 }
 
 void UpdateSortHeaderIndicator() {
@@ -77,8 +125,8 @@ void UpdateSortHeaderIndicator() {
     }
 }
 
-std::vector<std::wstring> SearchAll(const std::wstring& query) {
-    std::vector<std::wstring> results;
+std::vector<SearchResult> SearchAll(const std::wstring& query) {
+    std::vector<SearchResult> results;
     for (auto& volume : g_volumes) {
         if (results.size() >= kMaxResults) break;
         auto partial = volume->Search(query, kMaxResults - results.size());
@@ -159,13 +207,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             LVCOLUMNW col{};
             col.mask = LVCF_TEXT | LVCF_WIDTH;
-            col.cx = 220;
+            col.cx = 180;
             col.pszText = const_cast<LPWSTR>(L"이름");
             ListView_InsertColumn(g_resultsView, 0, &col);
 
-            col.cx = 360;
+            col.cx = 260;
             col.pszText = const_cast<LPWSTR>(L"경로");
             ListView_InsertColumn(g_resultsView, 1, &col);
+
+            col.cx = 80;
+            col.pszText = const_cast<LPWSTR>(L"크기");
+            ListView_InsertColumn(g_resultsView, 2, &col);
+
+            col.cx = 130;
+            col.pszText = const_cast<LPWSTR>(L"수정한 날짜");
+            ListView_InsertColumn(g_resultsView, 3, &col);
 
             std::thread(IndexingThread, hwnd).detach();
             return 0;
@@ -176,8 +232,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             MoveWindow(g_searchBox, 8, 32, w - 16, 26, TRUE);
             MoveWindow(g_resultsView, 8, 64, w - 16, h - 72, TRUE);
             int totalW = w - 16 - 20;  // minus scrollbar allowance
-            ListView_SetColumnWidth(g_resultsView, 0, totalW * 35 / 100);
-            ListView_SetColumnWidth(g_resultsView, 1, totalW * 65 / 100);
+            ListView_SetColumnWidth(g_resultsView, 0, totalW * 27 / 100);
+            ListView_SetColumnWidth(g_resultsView, 1, totalW * 38 / 100);
+            ListView_SetColumnWidth(g_resultsView, 2, totalW * 12 / 100);
+            ListView_SetColumnWidth(g_resultsView, 3, totalW * 23 / 100);
             return 0;
         }
         case kMsgIndexReady: {
@@ -208,15 +266,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int i = di->item.iItem;
                 if ((di->item.mask & LVIF_TEXT) && i >= 0 &&
                     static_cast<size_t>(i) < g_results.size()) {
-                    std::wstring name, dir;
-                    SplitNameAndDir(g_results[i], name, dir);
-                    const std::wstring& text = (di->item.iSubItem == 0) ? name : dir;
+                    const SearchResult& r = g_results[i];
+                    std::wstring text;
+                    switch (di->item.iSubItem) {
+                        case 0: {
+                            std::wstring name, dir;
+                            SplitNameAndDir(r.path, name, dir);
+                            text = name;
+                            break;
+                        }
+                        case 1: {
+                            std::wstring name, dir;
+                            SplitNameAndDir(r.path, name, dir);
+                            text = dir;
+                            break;
+                        }
+                        case 2:
+                            text = FormatSize(r.size, (r.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0);
+                            break;
+                        case 3:
+                            text = FormatFileTime(r.modifiedTime);
+                            break;
+                    }
                     wcsncpy_s(di->item.pszText, di->item.cchTextMax, text.c_str(), _TRUNCATE);
                 }
             } else if (hdr->code == NM_DBLCLK) {
                 auto* nm = reinterpret_cast<NMITEMACTIVATE*>(lParam);
                 if (nm->iItem >= 0 && static_cast<size_t>(nm->iItem) < g_results.size()) {
-                    ShellExecuteW(nullptr, L"open", g_results[nm->iItem].c_str(), nullptr,
+                    ShellExecuteW(nullptr, L"open", g_results[nm->iItem].path.c_str(), nullptr,
                                   nullptr, SW_SHOWNORMAL);
                 }
             } else if (hdr->code == LVN_COLUMNCLICK) {
@@ -238,7 +315,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             int selected = ListView_GetNextItem(g_resultsView, -1, LVNI_SELECTED);
             if (selected < 0 || static_cast<size_t>(selected) >= g_results.size()) return 0;
-            const std::wstring path = g_results[selected];
+            const std::wstring path = g_results[selected].path;
 
             int x = static_cast<int>(static_cast<short>(LOWORD(lParam)));
             int y = static_cast<int>(static_cast<short>(HIWORD(lParam)));

@@ -10,6 +10,15 @@
 
 #include "file_entry.h"
 
+// One search hit: the resolved full path plus the metadata a results list
+// wants to show (and, later, filter/sort on) without re-resolving anything.
+struct SearchResult {
+    std::wstring path;
+    uint64_t size = 0;
+    uint64_t modifiedTime = 0;  // FILETIME as a single 100ns-tick uint64
+    DWORD attributes = 0;
+};
+
 // Holds the full name+path index for a single NTFS volume: an initial full
 // scan via FSCTL_ENUM_USN_DATA (reads MFT records through the USN interface,
 // not a directory walk), plus incremental updates fed in from the USN
@@ -19,7 +28,7 @@ public:
     bool BuildFromVolume(wchar_t driveLetter, std::wstring& errorOut);
     void ApplyUsnRecord(const USN_RECORD* record);
 
-    std::vector<std::wstring> Search(const std::wstring& query, size_t maxResults) const;
+    std::vector<SearchResult> Search(const std::wstring& query, size_t maxResults) const;
     size_t Count() const;
     wchar_t Drive() const { return driveLetter_; }
 
