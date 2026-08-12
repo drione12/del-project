@@ -18,6 +18,7 @@ add_executable(EverythingClone WIN32
     src/volume_utils.cpp
     src/text_match.cpp
     src/query.cpp
+    src/mft_record.cpp
     src/app.rc
 )
 

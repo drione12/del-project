@@ -2,6 +2,7 @@
 
 #include <cstdio>
 
+#include "mft_record.h"
 #include "query.h"
 
 namespace {
@@ -78,11 +79,25 @@ bool NtfsIndex::BuildFromVolume(wchar_t driveLetter, std::wstring& errorOut) {
     }
 
     DWORD err = GetLastError();
-    CloseHandle(hVol);
     if (err != ERROR_HANDLE_EOF) {
+        CloseHandle(hVol);
         errorOut = L"MFT enumeration failed (error " + std::to_wstring(err) + L")";
         return false;
     }
+
+    // Second pass: FSCTL_ENUM_USN_DATA above only gave us names/attributes.
+    // Size and timestamps live in each file's own raw MFT record.
+    for (auto& [frn, entry] : newRecords) {
+        MftRecordInfo mftInfo = ReadMftRecordInfo(hVol, frn);
+        if (mftInfo.valid) {
+            entry.size = mftInfo.size;
+            entry.createdTime = mftInfo.createdTime;
+            entry.modifiedTime = mftInfo.modifiedTime;
+            entry.accessedTime = mftInfo.accessedTime;
+        }
+    }
+
+    CloseHandle(hVol);
 
     std::lock_guard<std::mutex> lock(mutex_);
     records_ = std::move(newRecords);
