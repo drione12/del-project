@@ -9,14 +9,22 @@ voidtools의 [Everything](https://www.voidtools.com/)이 파일을 즉시 검색
 3. **검색** (`ntfs_index.cpp: Search`): 메모리에 있는 레코드를 선형 스캔하며 대소문자 무시 부분 문자열/와일드카드(`*`, `?`) 매칭. 수백만 건이라도 전부 RAM에 있는 짧은 문자열이라 이 방식으로도 충분히 빠릅니다 — 실제 Everything도 "똑똑한 알고리즘"보다는 이 접근 자체가 빠름의 원천입니다.
 4. **UI** (`main.cpp`): 콘솔에서 한 글자씩 입력할 때마다 즉시 재검색해서 다시 그리는 실시간 검색 REPL.
 
-## 빌드 (Windows 필요)
+## 빌드
 
-이 리눅스 개발 환경에서는 Win32 저수준 API(`winioctl.h`, MFT/USN 관련 `DeviceIoControl`)를 쓰기 때문에 빌드·실행이 불가능합니다. Windows + Visual Studio 2019/2022 (또는 Build Tools) 에서:
+### 방법 1: GitHub Actions (로컬에 아무것도 설치 안 해도 됨)
+
+이 저장소를 push 하면 `.github/workflows/build.yml` 이 GitHub의 Windows 클라우드 러너에서 자동으로 빌드하고, 결과 `EverythingClone.exe` 를 워크플로 실행 결과 페이지의 **Artifacts** 에서 다운로드할 수 있습니다. 로컬에 Visual Studio/CMake를 설치할 필요가 없습니다.
+
+### 방법 2: 로컬에서 직접 빌드 (Windows 필요)
+
+이 리눅스 개발 환경에서는 Win32 저수준 API(`winioctl.h`, MFT/USN 관련 `DeviceIoControl`)를 쓰기 때문에 빌드·실행이 불가능합니다. Windows + Visual Studio (또는 Build Tools) 설치 후:
 
 ```powershell
-cmake -B build -G "Visual Studio 17 2022"
+cmake -B build
 cmake --build build --config Release
 ```
+
+제너레이터를 따로 지정하지 않으면 CMake가 설치된 Visual Studio 버전을 알아서 찾습니다.
 
 ## 실행
 
