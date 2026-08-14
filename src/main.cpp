@@ -478,6 +478,88 @@ void ActionDelete(HWND hwnd, const std::vector<std::wstring>& paths) {
     RunSearch();
 }
 
+// Runs an external command line and waits for it to finish, with no
+// visible console window - used for the attrib/takeown/icacls fallback
+// below. None of the three commands' own exit codes are checked
+// individually (mirroring memory_master/core/ownership.py's Python
+// equivalent in the other app in this repo, which does the same) - the
+// real signal is whether the delete retry succeeds afterward.
+void RunCommandAndWait(std::wstring commandLine) {
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    // CreateProcessW may write into this buffer in place, so it can't be a
+    // string literal or other read-only data - commandLine is taken by
+    // value specifically so &commandLine[0] is always a mutable,
+    // null-terminated buffer this call owns.
+    if (CreateProcessW(nullptr, &commandLine[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                        nullptr, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, 10000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+}
+
+// Clears read-only/system/hidden attributes and takes ownership so a
+// subsequent delete retry has a real chance of succeeding where a plain
+// one just failed - the same attrib/takeown/icacls sequence
+// memory_master/core/ownership.py already uses successfully for the same
+// purpose in this repo's other app.
+void TryOwnershipOverride(const std::wstring& path) {
+    RunCommandAndWait(L"attrib -r -s -h \"" + path + L"\"");
+    RunCommandAndWait(L"takeown /f \"" + path + L"\"");
+
+    wchar_t username[256]{};
+    GetEnvironmentVariableW(L"USERNAME", username, 256);
+    RunCommandAndWait(L"icacls \"" + path + L"\" /grant \"" + username + L":F\" /c /q");
+}
+
+bool DeletePermanently(HWND hwnd, const std::wstring& path) {
+    std::wstring doubleNull = path + L'\0' + L'\0';
+    SHFILEOPSTRUCTW op{};
+    op.hwnd = hwnd;
+    op.wFunc = FO_DELETE;
+    op.pFrom = doubleNull.c_str();
+    op.fFlags = FOF_NOCONFIRMATION;  // no FOF_ALLOWUNDO - bypasses the Recycle Bin, unlike ActionDelete
+    int result = SHFileOperationW(&op);
+    return result == 0 && !op.fAnyOperationsAborted;
+}
+
+// Permanent delete for one or more selected items - the one real
+// difference from ActionDelete above. On failure, retries once after
+// TryOwnershipOverride. Does not attempt to detect or kill a locking
+// process (Memory Master's Python force-delete does, via a much larger
+// API surface - Restart Manager - out of scope for this round); a locked
+// file just stays reported as a failure.
+void ActionForceDelete(HWND hwnd, const std::vector<std::wstring>& paths) {
+    if (paths.empty()) return;
+    std::wstring msg =
+        paths.size() == 1
+            ? (L"다음을 영구적으로 삭제하시겠습니까? 이 작업은 휴지통을 거치지 않으며 되돌릴 수 "
+               L"없습니다.\n\n" +
+               paths[0])
+            : (L"선택한 " + std::to_wstring(paths.size()) +
+               L"개 항목을 영구적으로 삭제하시겠습니까? 이 작업은 휴지통을 거치지 않으며 되돌릴 수 "
+               L"없습니다.");
+    if (MessageBoxW(hwnd, msg.c_str(), L"강제 삭제 확인", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) !=
+        IDYES) {
+        return;
+    }
+
+    int failedCount = 0;
+    for (auto& path : paths) {
+        if (DeletePermanently(hwnd, path)) continue;
+        TryOwnershipOverride(path);
+        if (!DeletePermanently(hwnd, path)) failedCount++;
+    }
+
+    if (failedCount > 0) {
+        MessageBoxW(hwnd, (std::to_wstring(failedCount) + L"개 항목을 삭제하지 못했습니다.").c_str(),
+                    L"삭제 실패", MB_OK | MB_ICONERROR);
+    }
+    RunSearch();
+}
+
 void ActionProperties(HWND hwnd, const std::wstring& path) {
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
@@ -930,6 +1012,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     std::vector<std::wstring> paths;
                     GetSelectedResults(paths);
                     ActionDelete(hwnd, paths);
+                    break;
+                }
+                case IDM_FILE_FORCEDELETE: {
+                    std::vector<std::wstring> paths;
+                    GetSelectedResults(paths);
+                    ActionForceDelete(hwnd, paths);
                     break;
                 }
                 case IDM_FILE_REFRESH:

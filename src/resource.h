@@ -32,4 +32,7 @@
 #define IDM_EDIT_CUT 2023
 #define IDM_FILE_RENAME 2024
 
+// New in the force-delete round.
+#define IDM_FILE_FORCEDELETE 2025
+
 #define IDR_ACCELERATORS 1
