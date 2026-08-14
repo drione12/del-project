@@ -7,7 +7,7 @@ voidtools의 [Everything](https://www.voidtools.com/)이 파일을 즉시 검색
 1. **초기 인덱싱** (`ntfs_index.cpp`): 폴더를 재귀적으로 순회하는 대신, `DeviceIoControl(FSCTL_ENUM_USN_DATA)` 로 NTFS 볼륨의 MFT 레코드를 한 번에 쭉 열거합니다. 각 레코드는 `(FRN, 부모 FRN, 파일명, 속성)` 만 담고 있어 전체 경로가 아니므로, 검색 시 부모 체인을 따라 올라가며 경로를 조립하고 캐싱합니다. 이어서 각 파일의 raw MFT 레코드를 `FSCTL_GET_NTFS_FILE_RECORD` 로 직접 읽어 `$STANDARD_INFORMATION`(생성·수정·접근 날짜)과 `$DATA`(크기)를 채웁니다 (`mft_record.cpp`) — USN 열거만으로는 이름/속성 외엔 안 주기 때문입니다.
 2. **실시간 갱신** (`usn_watcher.cpp`): 초기 인덱싱 후에는 `FSCTL_QUERY_USN_JOURNAL` / `FSCTL_READ_USN_JOURNAL` 로 USN 변경 저널을 계속 tail 하면서 생성·삭제·이름변경만 인덱스에 반영합니다. 재스캔이 전혀 없습니다.
 3. **검색** (`query.cpp` + `ntfs_index.cpp: Search`): 실제 Everything 설치파일을 분석해서 뽑아낸 검색 문법(AND/OR/NOT, 와일드카드, 정규식, `ext:`/`attrib:`/`file:`/`folder:`/`case:`/`path:`/`wholeword:` 등)을 파싱해 메모리에 있는 레코드를 선형 스캔하며 매칭합니다. 수백만 건이라도 전부 RAM에 있는 짧은 문자열이라 이 방식으로도 충분히 빠릅니다 — 실제 Everything도 "똑똑한 알고리즘"보다는 이 접근 자체가 빠름의 원천입니다.
-4. **UI** (`main.cpp`): Win32 GUI 창. 검색창에 입력할 때마다 즉시 재검색하고, 결과는 이름/경로/크기/수정한 날짜 컬럼을 가진 가상 리스트뷰(`LVS_OWNERDATA`)로 표시 — 수천 건이 나와도 그때그때 필요한 행만 그려서 버벅이지 않습니다. 컬럼 헤더를 클릭하면 그 컬럼 기준으로 정렬, 결과를 더블클릭하면 열림, 우클릭하면 열기/포함 폴더 열기/경로 복사/삭제/속성 메뉴가 뜹니다.
+4. **UI** (`main.cpp`): Win32 GUI 창. 검색창에 입력할 때마다 즉시 재검색하고, 결과는 이름/경로/크기/수정한 날짜 컬럼을 가진 가상 리스트뷰(`LVS_OWNERDATA`)로 표시 — 수천 건이 나와도 그때그때 필요한 행만 그려서 버벅이지 않습니다. 각 항목 이름 옆에는 셸의 공유 아이콘 목록(`SHGetFileInfoW(SHGFI_SYSICONINDEX)`)에서 가져온 실제 파일 종류 아이콘이 붙습니다(확장자별로 캐싱해서 반복 조회 안 함). 컬럼 헤더를 클릭하면 그 컬럼 기준으로 정렬, 결과를 더블클릭하면 열림, 우클릭하면 열기/포함 폴더 열기/경로 복사/삭제/속성 메뉴가 뜹니다.
 
 ## 빌드
 

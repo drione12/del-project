@@ -13,11 +13,13 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <wchar.h>
 
 #include "ntfs_index.h"
 #include "privileges.h"
+#include "text_match.h"
 #include "usn_watcher.h"
 #include "volume_utils.h"
 
@@ -37,6 +39,7 @@ HWND g_status = nullptr;
 HWND g_resultsView = nullptr;
 int g_sortColumn = 0;  // 0 = Name, 1 = Path, 2 = Size, 3 = Date modified
 bool g_sortAscending = true;
+std::unordered_map<std::wstring, int> g_iconCache;  // extension (or a sentinel) -> icon index
 
 void SplitNameAndDir(const std::wstring& fullPath, std::wstring& name, std::wstring& dir) {
     size_t pos = fullPath.find_last_of(L'\\');
@@ -84,6 +87,39 @@ std::wstring FormatFileTime(uint64_t fileTimeValue) {
     swprintf_s(buf, L"%04d-%02d-%02d %02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour,
                st.wMinute);
     return buf;
+}
+
+// Looks up the shared shell icon index for a result, caching by extension
+// (or a sentinel for folders/no-extension) so repeated files of the same
+// type don't each cost a SHGetFileInfoW call.
+int GetIconIndex(const SearchResult& r) {
+    bool isDir = (r.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+    std::wstring key;
+    std::wstring probe;
+    DWORD attrs;
+    if (isDir) {
+        key = L"\\dir";
+        probe = L"folder";
+        attrs = FILE_ATTRIBUTE_DIRECTORY;
+    } else {
+        std::wstring name, dir;
+        SplitNameAndDir(r.path, name, dir);
+        size_t dot = name.find_last_of(L'.');
+        std::wstring ext = (dot == std::wstring::npos) ? std::wstring() : ToLower(name.substr(dot));
+        key = ext.empty() ? L"\\noext" : ext;
+        probe = ext.empty() ? L"file" : ext;
+        attrs = FILE_ATTRIBUTE_NORMAL;
+    }
+
+    auto it = g_iconCache.find(key);
+    if (it != g_iconCache.end()) return it->second;
+
+    SHFILEINFOW sfi{};
+    SHGetFileInfoW(probe.c_str(), attrs, &sfi, sizeof(sfi),
+                   SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
+    g_iconCache[key] = sfi.iIcon;
+    return sfi.iIcon;
 }
 
 void SortResults() {
@@ -205,6 +241,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kResultsId)), nullptr, nullptr);
             ListView_SetExtendedListViewStyle(g_resultsView, LVS_EX_FULLROWSELECT);
 
+            // One-time: grab the shell's shared small-icon image list (a real
+            // existing path is expected here, unlike the per-result lookups
+            // below) and attach it so rows can show file-type icons.
+            SHFILEINFOW sysSfi{};
+            HIMAGELIST sysImageList = reinterpret_cast<HIMAGELIST>(SHGetFileInfoW(
+                L"C:\\", 0, &sysSfi, sizeof(sysSfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON));
+            if (sysImageList) {
+                ListView_SetImageList(g_resultsView, sysImageList, LVSIL_SMALL);
+            }
+
             LVCOLUMNW col{};
             col.mask = LVCF_TEXT | LVCF_WIDTH;
             col.cx = 180;
@@ -289,6 +335,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             break;
                     }
                     wcsncpy_s(di->item.pszText, di->item.cchTextMax, text.c_str(), _TRUNCATE);
+                }
+                if ((di->item.mask & LVIF_IMAGE) && di->item.iSubItem == 0 && i >= 0 &&
+                    static_cast<size_t>(i) < g_results.size()) {
+                    di->item.iImage = GetIconIndex(g_results[i]);
                 }
             } else if (hdr->code == NM_DBLCLK) {
                 auto* nm = reinterpret_cast<NMITEMACTIVATE*>(lParam);
