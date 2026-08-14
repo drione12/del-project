@@ -408,6 +408,20 @@ QueryTerm ParseTerm(std::wstring tok) {
     } else if (StartsWith(lower, L"da:")) {
         term.kind = QueryTerm::Kind::DateAccessed;
         ParseDateValue(tok.substr(3), term);
+    } else if (lower == L"dupe:") {
+        term.kind = QueryTerm::Kind::Dupe;
+    } else if (lower == L"sizedupe:") {
+        term.kind = QueryTerm::Kind::SizeDupe;
+    } else if (lower == L"namepartdupe:") {
+        term.kind = QueryTerm::Kind::NamePartDupe;
+    } else if (lower == L"attribdupe:") {
+        term.kind = QueryTerm::Kind::AttribDupe;
+    } else if (lower == L"dadupe:") {
+        term.kind = QueryTerm::Kind::DateAccessedDupe;
+    } else if (lower == L"dcdupe:") {
+        term.kind = QueryTerm::Kind::DateCreatedDupe;
+    } else if (lower == L"dmdupe:") {
+        term.kind = QueryTerm::Kind::DateModifiedDupe;
     } else {
         term.kind = QueryTerm::Kind::Text;
         term.text = tok;
@@ -489,9 +503,14 @@ bool MatchAttrib(DWORD attributes, const std::wstring& letters) {
     return true;
 }
 
+bool InDupeSet(const std::unordered_set<uint64_t>* set, uint64_t frn) {
+    return set && set->count(frn) != 0;
+}
+
 bool MatchesTerm(const QueryTerm& term, const MatchOptions& opts, const std::wstring& name,
                   const std::wstring& path, DWORD attributes, uint64_t size, uint64_t createdTime,
-                  uint64_t modifiedTime, uint64_t accessedTime) {
+                  uint64_t modifiedTime, uint64_t accessedTime, uint64_t frn,
+                  const DupeMembership* dupes) {
     switch (term.kind) {
         case QueryTerm::Kind::Ext:
             return MatchExt(name, term.text);
@@ -512,6 +531,20 @@ bool MatchesTerm(const QueryTerm& term, const MatchOptions& opts, const std::wst
         case QueryTerm::Kind::DateAccessed:
             return accessedTime != 0 &&
                    CompareValue(term.op, accessedTime, term.valueLow, term.valueHigh);
+        case QueryTerm::Kind::Dupe:
+            return dupes && InDupeSet(dupes->dupe, frn);
+        case QueryTerm::Kind::SizeDupe:
+            return dupes && InDupeSet(dupes->sizeDupe, frn);
+        case QueryTerm::Kind::NamePartDupe:
+            return dupes && InDupeSet(dupes->namePartDupe, frn);
+        case QueryTerm::Kind::AttribDupe:
+            return dupes && InDupeSet(dupes->attribDupe, frn);
+        case QueryTerm::Kind::DateAccessedDupe:
+            return dupes && InDupeSet(dupes->dateAccessedDupe, frn);
+        case QueryTerm::Kind::DateCreatedDupe:
+            return dupes && InDupeSet(dupes->dateCreatedDupe, frn);
+        case QueryTerm::Kind::DateModifiedDupe:
+            return dupes && InDupeSet(dupes->dateModifiedDupe, frn);
         case QueryTerm::Kind::Text:
         default:
             return MatchText(opts.matchPath ? path : name, term.text, opts);
@@ -583,12 +616,12 @@ Query ParseQuery(const std::wstring& raw) {
 
 bool MatchesQuery(const Query& query, const std::wstring& name, const std::wstring& path,
                    DWORD attributes, uint64_t size, uint64_t createdTime, uint64_t modifiedTime,
-                   uint64_t accessedTime) {
+                   uint64_t accessedTime, uint64_t frn, const DupeMembership* dupes) {
     for (const auto& group : query.groups) {
         bool allMatch = true;
         for (const auto& term : group.terms) {
             bool m = MatchesTerm(term, query.options, name, path, attributes, size, createdTime,
-                                  modifiedTime, accessedTime);
+                                  modifiedTime, accessedTime, frn, dupes);
             if (term.negate) m = !m;
             if (!m) {
                 allMatch = false;

@@ -1,9 +1,12 @@
 #include "ntfs_index.h"
 
 #include <cstdio>
+#include <unordered_set>
+#include <utility>
 
 #include "mft_record.h"
 #include "query.h"
+#include "text_match.h"
 
 namespace {
 constexpr size_t kEnumBufferSize = 64 * 1024;
@@ -18,7 +21,33 @@ constexpr DWORD kMftRefreshReasonMask =
     USN_REASON_FILE_CREATE | USN_REASON_DATA_OVERWRITE | USN_REASON_DATA_EXTEND |
     USN_REASON_DATA_TRUNCATION | USN_REASON_BASIC_INFO_CHANGE |
     USN_REASON_RENAME_NEW_NAME | USN_REASON_HARD_LINK_CHANGE;
+
+// Groups every record by keyFn(entry) (skipping any entry skipFn flags) and
+// returns the FRNs that share a key with at least one other record - i.e.
+// the dupe: family's definition of "duplicate". Used with the mutex_ already
+// held, over the full index rather than just the current search hits, since
+// "is this a duplicate" is a whole-population question.
+template <typename KeyFn, typename SkipFn>
+std::unordered_set<uint64_t> BuildDupeSet(const std::unordered_map<uint64_t, FileEntry>& records,
+                                           KeyFn keyFn, SkipFn skipFn) {
+    std::unordered_map<decltype(keyFn(std::declval<const FileEntry&>())), std::vector<uint64_t>>
+        groups;
+    for (const auto& [frn, entry] : records) {
+        if (skipFn(entry)) continue;
+        groups[keyFn(entry)].push_back(frn);
+    }
+
+    std::unordered_set<uint64_t> dupes;
+    for (const auto& [key, frns] : groups) {
+        if (frns.size() < 2) continue;
+        for (uint64_t frn : frns) dupes.insert(frn);
+    }
+    return dupes;
 }
+
+bool NeverSkip(const FileEntry&) { return false; }
+
+}  // namespace
 
 bool NtfsIndex::BuildFromVolume(wchar_t driveLetter, std::wstring& errorOut) {
     driveLetter_ = driveLetter;
@@ -202,18 +231,84 @@ std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText,
     Query query = ParseQuery(queryText);
     if (query.groups.empty()) return results;
 
+    bool needDupe = false, needSizeDupe = false, needNamePartDupe = false, needAttribDupe = false;
+    bool needDaDupe = false, needDcDupe = false, needDmDupe = false;
+    for (const auto& group : query.groups) {
+        for (const auto& term : group.terms) {
+            switch (term.kind) {
+                case QueryTerm::Kind::Dupe: needDupe = true; break;
+                case QueryTerm::Kind::SizeDupe: needSizeDupe = true; break;
+                case QueryTerm::Kind::NamePartDupe: needNamePartDupe = true; break;
+                case QueryTerm::Kind::AttribDupe: needAttribDupe = true; break;
+                case QueryTerm::Kind::DateAccessedDupe: needDaDupe = true; break;
+                case QueryTerm::Kind::DateCreatedDupe: needDcDupe = true; break;
+                case QueryTerm::Kind::DateModifiedDupe: needDmDupe = true; break;
+                default: break;
+            }
+        }
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
+
+    std::unordered_set<uint64_t> dupeSet, sizeDupeSet, namePartDupeSet, attribDupeSet;
+    std::unordered_set<uint64_t> daDupeSet, dcDupeSet, dmDupeSet;
+    DupeMembership dupes;
+    if (needDupe) {
+        dupeSet = BuildDupeSet(
+            records_, [](const FileEntry& e) { return ToLower(e.name); }, NeverSkip);
+        dupes.dupe = &dupeSet;
+    }
+    if (needSizeDupe) {
+        sizeDupeSet = BuildDupeSet(
+            records_, [](const FileEntry& e) { return e.size; }, NeverSkip);
+        dupes.sizeDupe = &sizeDupeSet;
+    }
+    if (needNamePartDupe) {
+        namePartDupeSet = BuildDupeSet(
+            records_,
+            [](const FileEntry& e) {
+                size_t dot = e.name.find_last_of(L'.');
+                return ToLower(dot == std::wstring::npos ? e.name : e.name.substr(0, dot));
+            },
+            NeverSkip);
+        dupes.namePartDupe = &namePartDupeSet;
+    }
+    if (needAttribDupe) {
+        attribDupeSet = BuildDupeSet(
+            records_, [](const FileEntry& e) { return e.attributes; }, NeverSkip);
+        dupes.attribDupe = &attribDupeSet;
+    }
+    if (needDaDupe) {
+        daDupeSet = BuildDupeSet(
+            records_, [](const FileEntry& e) { return e.accessedTime; },
+            [](const FileEntry& e) { return e.accessedTime == 0; });
+        dupes.dateAccessedDupe = &daDupeSet;
+    }
+    if (needDcDupe) {
+        dcDupeSet = BuildDupeSet(
+            records_, [](const FileEntry& e) { return e.createdTime; },
+            [](const FileEntry& e) { return e.createdTime == 0; });
+        dupes.dateCreatedDupe = &dcDupeSet;
+    }
+    if (needDmDupe) {
+        dmDupeSet = BuildDupeSet(
+            records_, [](const FileEntry& e) { return e.modifiedTime; },
+            [](const FileEntry& e) { return e.modifiedTime == 0; });
+        dupes.dateModifiedDupe = &dmDupeSet;
+    }
+
     for (const auto& [frn, entry] : records_) {
         std::wstring path;
         bool matched;
         if (query.options.matchPath) {
             path = ResolvePathLocked(frn);
             matched = MatchesQuery(query, entry.name, path, entry.attributes, entry.size,
-                                    entry.createdTime, entry.modifiedTime, entry.accessedTime);
+                                    entry.createdTime, entry.modifiedTime, entry.accessedTime,
+                                    frn, &dupes);
         } else {
             matched = MatchesQuery(query, entry.name, std::wstring(), entry.attributes,
                                     entry.size, entry.createdTime, entry.modifiedTime,
-                                    entry.accessedTime);
+                                    entry.accessedTime, frn, &dupes);
             if (matched) path = ResolvePathLocked(frn);
         }
         if (!matched) continue;

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include <windows.h>
 
@@ -28,7 +29,14 @@ struct QueryTerm {
         Size,
         DateModified,
         DateCreated,
-        DateAccessed
+        DateAccessed,
+        Dupe,
+        SizeDupe,
+        NamePartDupe,
+        AttribDupe,
+        DateAccessedDupe,
+        DateCreatedDupe,
+        DateModifiedDupe
     };
     Kind kind = Kind::Text;
     std::wstring text;
@@ -49,9 +57,24 @@ struct Query {
     MatchOptions options;
 };
 
+// Precomputed FRN membership for the dupe: filter family (dupe:/sizedupe:/
+// namepartdupe:/attribdupe:/dadupe:/dcdupe:/dmdupe:) - each pointer is null
+// when the query doesn't use that particular filter, so NtfsIndex::Search
+// only pays for the whole-index grouping pass(es) it actually needs.
+struct DupeMembership {
+    const std::unordered_set<uint64_t>* dupe = nullptr;
+    const std::unordered_set<uint64_t>* sizeDupe = nullptr;
+    const std::unordered_set<uint64_t>* namePartDupe = nullptr;
+    const std::unordered_set<uint64_t>* attribDupe = nullptr;
+    const std::unordered_set<uint64_t>* dateAccessedDupe = nullptr;
+    const std::unordered_set<uint64_t>* dateCreatedDupe = nullptr;
+    const std::unordered_set<uint64_t>* dateModifiedDupe = nullptr;
+};
+
 // FILETIME values (created/modified/accessed) are each a single 100ns-tick
 // uint64, 0 meaning "unknown" - matching FileEntry/SearchResult elsewhere.
+// `frn` + `dupes` are only consulted for Kind::*Dupe terms.
 Query ParseQuery(const std::wstring& raw);
 bool MatchesQuery(const Query& query, const std::wstring& name, const std::wstring& path,
                    DWORD attributes, uint64_t size, uint64_t createdTime, uint64_t modifiedTime,
-                   uint64_t accessedTime);
+                   uint64_t accessedTime, uint64_t frn = 0, const DupeMembership* dupes = nullptr);

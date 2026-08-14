@@ -628,7 +628,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         L"case: / path: / wholeword:  전역 토글\n"
                         L"regex:            정규식\n"
                         L"size:>10mb        크기 필터\n"
-                        L"dm:today          수정일 필터 (dc:/da:도 동일)",
+                        L"dm:today          수정일 필터 (dc:/da:도 동일)\n"
+                        L"dupe:             중복 파일명 (sizedupe:/namepartdupe:/attribdupe:/\n"
+                        L"                  dadupe:/dcdupe:/dmdupe:도 동일한 방식)",
                         L"검색 문법 도움말", MB_OK | MB_ICONINFORMATION);
                     break;
                 case IDM_HELP_ABOUT:
