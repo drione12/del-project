@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QVBoxLayou
 from ui.pages.cleanup_page import CleanupPage
 from ui.pages.dashboard_page import DashboardPage
 from ui.pages.placeholder_page import PlaceholderPage
+from ui.pages.search_page import SearchPage
 from ui.pages.settings_page import SettingsPage
 from ui.pages.startup_manager_page import StartupManagerPage
 from ui.sidebar import Sidebar
@@ -29,6 +30,7 @@ WINDOW_HEIGHT = 800
 _PAGES = [
     ("dashboard", "cpu", "대시보드"),
     ("cleanup", "cleanup", "정리"),
+    ("search", "search", "파일 검색"),
     ("settings", "gear", "설정"),
     ("startup", "sliders", "시작 프로그램"),
 ]
@@ -88,6 +90,8 @@ class MainWindow(QMainWindow):
             return DashboardPage()
         if page_id == "cleanup":
             return CleanupPage()
+        if page_id == "search":
+            return SearchPage()
         if page_id == "settings":
             return SettingsPage()
         if page_id == "startup":

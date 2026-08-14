@@ -16,12 +16,30 @@ def test_load_missing_file_returns_defaults():
 def test_save_and_load_roundtrip():
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "config.json")
-        original = AppConfig(theme="light", always_on_top=True, opacity=0.8, quarantine_dir="/some/path")
+        original = AppConfig(
+            theme="light",
+            always_on_top=True,
+            opacity=0.8,
+            quarantine_dir="/some/path",
+            search_folders=["/home/user/Documents", "/home/user/Downloads"],
+        )
 
         assert save_config(original, path)
         loaded = load_config(path)
 
         assert loaded == original
+
+
+def test_load_config_without_search_folders_key_defaults_to_empty_list():
+    """A config.json saved before this field existed has no
+    "search_folders" key at all - must not crash, must default to [].
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "config.json")
+        with open(path, "w") as f:
+            f.write('{"theme": "light"}')
+
+        assert load_config(path).search_folders == []
 
 
 def test_load_corrupt_file_returns_defaults():
