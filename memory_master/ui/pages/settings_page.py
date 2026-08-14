@@ -5,8 +5,6 @@ persists everything via core/config.py.
 """
 from __future__ import annotations
 
-import os
-
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QApplication,
@@ -26,8 +24,7 @@ from PyQt5.QtWidgets import (
 
 from core.config import load_config, save_config
 from core.quarantine import default_quarantine_dir
-
-_RESOURCES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "resources")
+from core.resource_path import resource_path
 
 
 def _section_title(text: str) -> QLabel:
@@ -129,7 +126,7 @@ class SettingsPage(QWidget):
             return
         qss_name = "theme.qss" if theme == "dark" else "theme_light.qss"
         try:
-            with open(os.path.join(_RESOURCES_DIR, qss_name), "r", encoding="utf-8") as f:
+            with open(resource_path(qss_name), "r", encoding="utf-8") as f:
                 app.setStyleSheet(f.read())
         except OSError:
             pass

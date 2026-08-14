@@ -14,9 +14,9 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-_ICONS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "resources", "icons"
-)
+from core.resource_path import resource_path
+
+_ICONS_DIR = resource_path("icons")
 
 
 class PlaceholderPage(QWidget):

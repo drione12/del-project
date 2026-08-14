@@ -28,3 +28,27 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python memory_master/scripts/smoke_check.py
+
+  package:
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r memory_master/requirements.txt pyinstaller
+
+      - name: Build with PyInstaller
+        working-directory: memory_master
+        run: pyinstaller --noconfirm --onefile --windowed --name MemoryMaster --add-data "resources;resources" main.py
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: MemoryMaster
+          path: memory_master/dist/MemoryMaster.exe

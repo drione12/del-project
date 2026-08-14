@@ -8,23 +8,25 @@ C++/Win32)와는 완전히 분리된 별도의 Python/PyQt5 앱입니다 — 서
 
 목업 디자인(둥근 카드, 원형 게이지, 그라디언트)을 제대로 구현하려면 커스텀 그리기가
 많이 필요한데, Qt(QPainter + QSS)가 raw Win32 GDI보다 훨씬 적합하고 검증된 방법입니다.
-자세한 배경/설계 결정은 이 세션에서 작성한 계획 문서를 참고하세요 (요약: RAM/CPU/디스크/
-네트워크 대시보드, 강제 삭제 파이프라인, 중복 파일/사진 찾기, 시작 프로그램 관리, 프로세스
-화이트/블랙리스트 — 5개 사이드바 아이콘에 하나씩 대응).
 
-## 현재 상태
+## 기능 (사이드바 5개 아이콘)
 
-아직 개발 초기 단계입니다. 지금까지 구현된 것:
+- **대시보드** — RAM 원형 게이지, CPU/디스크/네트워크 현황, RAM/CPU/Swap 추이 및 항목별
+  비교 타일, RAM+Swap 웨이브 차트, 메모리 할당(사용 중/대기/압축/여유) 바, Quick Actions
+  (RAM 최적화, 캐시 정리, 프로세스 상세), 상위 프로세스 목록.
+- **정리** — 중복 파일 찾기(MD5), 중복/유사 이미지 찾기(퍼셉추얼 해시 + OpenCV ORB로
+  잘린/부분 일치까지 탐지), 검토 다이얼로그(미리보기, 우선 유지 폴더 자동 선택), 파일/
+  폴더를 끌어다 놓으면 강제 삭제 파이프라인으로 바로 연결되는 드롭 영역.
+- **보호** — 프로세스 화이트리스트(강제 삭제 대상에서 항상 제외)/블랙리스트(실행되는
+  즉시 자동 종료, 2초 주기 감시), 핵심 보호 경로 목록(읽기 전용) + 사용자 추가 경로.
+- **설정** — 다크/라이트 테마, 항상 위에 표시, 창 투명도, 격리 폴더 위치.
+- **시작 프로그램** — 레지스트리 Run 키 + 작업 스케줄러 항목, 부팅 영향도(낮음/보통/높음)
+  추정, 레지스트리 항목 추가/제거.
 
-- `core/path_guard.py` — 핵심 시스템 경로(윈도우 폴더, Program Files, 사용자 프로필 전체
-  등)를 강제 삭제로부터 보호하는 로직. 실제 파일시스템을 건드리지 않는 순수 로직이라
-  아무 OS에서나 테스트 가능합니다.
-- `core/critical_processes.py` — 강제 삭제/블랙리스트 감시가 절대 건드리면 안 되는
-  프로세스 목록(자기 자신, PID 0/4, lsass.exe 등 핵심 시스템 프로세스).
-- `core/privileges.py` — `MOVEFILE_DELAY_UNTIL_REBOOT`(재부팅 시 삭제 예약)에 필요한
-  `SeRestorePrivilege`를 활성화하는 ctypes 코드. `src/privileges.cpp`의 `EnablePrivilege`
-  패턴을 그대로 옮긴 것. Windows 전용이라 이 개발 환경(Linux)에서는 실행/테스트 불가능—
-  `src/`의 나머지 Win32 코드와 마찬가지로 GitHub Actions에서만 검증됩니다.
+모든 강제 삭제는 하나의 공통 파이프라인(`core/force_delete.py`)을 거칩니다: 보호 경로
+차단 → 사용 중인 프로세스 확인(관리자 권한 없이는 소유권 변경 시도 안 함) → 확인
+다이얼로그로 종료될 프로세스 목록 표시 → 실행(진행률/취소 가능, 필요 시 재부팅 후 삭제
+예약, 선택적 3-패스 보안 삭제).
 
 ## 개발
 
@@ -33,5 +35,18 @@ pip install -r requirements.txt
 pytest tests -v
 ```
 
-`tests/`는 순수 로직만 테스트합니다(파일시스템도, 실제 Windows API도 건드리지 않음) —
-`ctypes.windll`을 쓰는 코드나 PyQt5 위젯은 Windows에서 GitHub Actions로만 검증됩니다.
+`tests/`는 순수 로직 + 실제 파일시스템 I/O(임시 파일 기준)를 테스트합니다 — 실제 Windows
+API(`ctypes.windll`, `winreg`)를 쓰는 코드는 이 코드가 실행되는 개발 환경(Linux)에서는
+GitHub Actions(windows-latest)로만 검증됩니다. PyQt5 위젯은 `QT_QPA_PLATFORM=offscreen`
+로 헤드리스 환경에서도 직접 구성/렌더링해 검증합니다 (`scripts/smoke_check.py`).
+
+## 빌드
+
+GitHub Actions에서 워크플로를 수동 실행(`workflow_dispatch`)하면 PyInstaller로
+단일 실행 파일을 패키징해 아티팩트로 올립니다 (`.github/workflows/build-memory-master.yml`
+의 `package` 잡). 로컬에서 직접 만들려면:
+
+```powershell
+pip install pyinstaller
+pyinstaller --noconfirm --onefile --windowed --name MemoryMaster --add-data "resources;resources" main.py
+```
