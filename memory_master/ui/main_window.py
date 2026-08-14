@@ -5,9 +5,8 @@ prevent it, since a frameless window (Qt.FramelessWindowHint) has no
 native edge/corner resize grips at all unless the app manually implements
 hit-testing for them (which this doesn't, to avoid the fiddliest part of
 frameless-window work - see the plan doc). Minimizing/closing both go to
-the system tray instead of exiting - the Protection page's blacklist
-watchdog (once built) only makes sense running continuously in the
-background.
+the system tray instead of exiting, so the app stays reachable without
+needing to be relaunched.
 """
 from __future__ import annotations
 
@@ -17,7 +16,6 @@ from PyQt5.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QVBoxLayou
 from ui.pages.cleanup_page import CleanupPage
 from ui.pages.dashboard_page import DashboardPage
 from ui.pages.placeholder_page import PlaceholderPage
-from ui.pages.protection_page import ProtectionPage
 from ui.pages.settings_page import SettingsPage
 from ui.pages.startup_manager_page import StartupManagerPage
 from ui.sidebar import Sidebar
@@ -27,13 +25,10 @@ from ui.tray import setup_tray
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 800
 
-# (page_id, icon_name, tooltip) - the mockup's 5 sidebar icons. Dashboard is
-# the first real page (added in a later commit); the rest start as
-# placeholders and get swapped in one at a time as each is built.
+# (page_id, icon_name, tooltip) - the sidebar's pages.
 _PAGES = [
     ("dashboard", "cpu", "대시보드"),
     ("cleanup", "cleanup", "정리"),
-    ("protection", "shield", "보호"),
     ("settings", "gear", "설정"),
     ("startup", "sliders", "시작 프로그램"),
 ]
@@ -93,8 +88,6 @@ class MainWindow(QMainWindow):
             return DashboardPage()
         if page_id == "cleanup":
             return CleanupPage()
-        if page_id == "protection":
-            return ProtectionPage()
         if page_id == "settings":
             return SettingsPage()
         if page_id == "startup":

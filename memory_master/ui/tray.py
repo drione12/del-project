@@ -1,7 +1,6 @@
 """System tray icon: minimize-to-tray on close, right-click menu with
-Open/Quit. Only meaningful alongside the (later) Protection page's
-blacklist watchdog, which needs the app running continuously in the
-background even when the window itself is hidden.
+Open/Quit - keeps the app reachable without needing to be relaunched
+instead of exiting when the window is closed.
 """
 from __future__ import annotations
 
