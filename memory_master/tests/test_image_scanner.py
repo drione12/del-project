@@ -58,7 +58,7 @@ def test_finds_near_duplicate_after_lossy_reencode():
         img.save(os.path.join(tmp, "a.png"))
         img.save(os.path.join(tmp, "b.jpg"), quality=85)
 
-        pairs = find_near_duplicate_images(tmp)
+        pairs = find_near_duplicate_images([tmp])
 
         assert len(pairs) == 1
         assert pairs[0].match_kind == "hash"
@@ -70,7 +70,36 @@ def test_does_not_match_unrelated_images():
         _make_textured_image(seed=0).save(os.path.join(tmp, "a.png"))
         Image.new("RGB", (200, 200), color=(10, 200, 10)).save(os.path.join(tmp, "solid_green.png"))
 
-        pairs = find_near_duplicate_images(tmp)
+        pairs = find_near_duplicate_images([tmp])
+
+        assert pairs == []
+
+
+def test_finds_near_duplicate_split_across_multiple_folders():
+    with tempfile.TemporaryDirectory() as tmp_a, tempfile.TemporaryDirectory() as tmp_b:
+        img = _make_textured_image()
+        img.save(os.path.join(tmp_a, "a.png"))
+        img.save(os.path.join(tmp_b, "b.jpg"), quality=85)
+
+        pairs = find_near_duplicate_images([tmp_a, tmp_b])
+
+        assert len(pairs) == 1
+        assert {pairs[0].path_a, pairs[0].path_b} == {
+            os.path.join(tmp_a, "a.png"),
+            os.path.join(tmp_b, "b.jpg"),
+        }
+
+
+def test_overlapping_roots_do_not_duplicate_or_self_pair():
+    with tempfile.TemporaryDirectory() as tmp:
+        nested = os.path.join(tmp, "nested")
+        os.makedirs(nested)
+        _make_textured_image().save(os.path.join(nested, "a.png"))
+
+        # tmp and its own subfolder both passed as roots - the same file
+        # would be listed twice without de-duplication, which would make
+        # it spuriously "pair" against itself.
+        pairs = find_near_duplicate_images([tmp, nested])
 
         assert pairs == []
 

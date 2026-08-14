@@ -26,13 +26,18 @@ def is_image_file(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in _IMAGE_EXTENSIONS
 
 
-def _list_images(root: str) -> List[str]:
-    found = []
-    for dirpath, _dirs, filenames in os.walk(root):
-        for name in filenames:
-            if is_image_file(name):
-                found.append(os.path.join(dirpath, name))
-    return found
+def _list_images(roots: List[str]) -> List[str]:
+    # A set, not a list, so picking two folders where one is nested inside
+    # the other (or the same folder twice) can't make a file appear more
+    # than once - that would otherwise let a file spuriously "pair" with
+    # itself once the same path is compared against itself further down.
+    found = set()
+    for root in roots:
+        for dirpath, _dirs, filenames in os.walk(root):
+            for name in filenames:
+                if is_image_file(name):
+                    found.add(os.path.join(dirpath, name))
+    return sorted(found)
 
 
 @dataclass
@@ -54,14 +59,16 @@ def _phash(path: str):
 
 
 def find_near_duplicate_images(
-    root: str,
+    roots: List[str],
     on_progress: Optional[Callable[[int, int], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
 ) -> List[ImagePair]:
     """Perceptual-hash pass - catches resizes, re-encodes, and minor edits
-    that keep the overall image layout intact.
+    that keep the overall image layout intact. roots may list more than
+    one folder, scanned together as a single pool (so a duplicate that
+    landed in two different chosen folders is still found).
     """
-    paths = _list_images(root)
+    paths = _list_images(roots)
     hashes = {}
     total = len(paths)
     for i, path in enumerate(paths):
@@ -113,7 +120,7 @@ def match_features_orb(path_a: str, path_b: str) -> Optional[int]:
 
 
 def find_similar_images_by_features(
-    root: str,
+    roots: List[str],
     on_progress: Optional[Callable[[int, int], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
 ) -> List[ImagePair]:
@@ -121,9 +128,10 @@ def find_similar_images_by_features(
     expensive than the hash pass (pairwise feature matching is O(n^2) in
     image count, and each comparison is itself non-trivial), so this is
     meant to run after find_near_duplicate_images(), on whatever wasn't
-    already caught there, not as a replacement for it.
+    already caught there, not as a replacement for it. roots may list more
+    than one folder, scanned together as a single pool.
     """
-    paths = _list_images(root)
+    paths = _list_images(roots)
     total_pairs = max(len(paths) * (len(paths) - 1) // 2, 1)
     pairs: List[ImagePair] = []
     done = 0

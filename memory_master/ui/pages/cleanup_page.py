@@ -44,9 +44,17 @@ class _DuplicateFilesWorker(QThread):
     def __init__(self, root: str, parent=None):
         super().__init__(parent)
         self._root = root
+        self._cancel_requested = False
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
 
     def run(self) -> None:
-        groups = find_duplicate_files(self._root, on_progress=lambda i, n: self.progress.emit(i, n))
+        groups = find_duplicate_files(
+            self._root,
+            on_progress=lambda i, n: self.progress.emit(i, n),
+            should_cancel=lambda: self._cancel_requested,
+        )
         self.resultReady.emit(groups)
 
 
@@ -54,17 +62,29 @@ class _ImageScanWorker(QThread):
     progress = pyqtSignal(int, int)
     resultReady = pyqtSignal(list)  # List[ImagePair]
 
-    def __init__(self, root: str, parent=None):
+    def __init__(self, roots: List[str], parent=None):
         super().__init__(parent)
-        self._root = root
+        self._roots = roots
+        self._cancel_requested = False
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
 
     def run(self) -> None:
-        pairs = find_near_duplicate_images(self._root, on_progress=lambda i, n: self.progress.emit(i, n))
+        def should_cancel() -> bool:
+            return self._cancel_requested
+
+        pairs = find_near_duplicate_images(
+            self._roots, on_progress=lambda i, n: self.progress.emit(i, n), should_cancel=should_cancel
+        )
         seen = {(p.path_a, p.path_b) for p in pairs}
-        feature_pairs = find_similar_images_by_features(self._root, on_progress=lambda i, n: self.progress.emit(i, n))
-        for pair in feature_pairs:
-            if (pair.path_a, pair.path_b) not in seen:
-                pairs.append(pair)
+        if not self._cancel_requested:
+            feature_pairs = find_similar_images_by_features(
+                self._roots, on_progress=lambda i, n: self.progress.emit(i, n), should_cancel=should_cancel
+            )
+            for pair in feature_pairs:
+                if (pair.path_a, pair.path_b) not in seen:
+                    pairs.append(pair)
         self.resultReady.emit(pairs)
 
 
@@ -82,6 +102,7 @@ class _AnalyzeWorker(QThread):
 class CleanupPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._image_folders: List[str] = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -130,10 +151,22 @@ class CleanupPage(QWidget):
         frame.setProperty("role", "card")
         layout = QVBoxLayout(frame)
         layout.addWidget(_section_title("중복/유사 이미지 찾기"))
+
+        self._image_folders_widget = QListWidget()
+        self._image_folders_widget.setMaximumHeight(100)
+        layout.addWidget(self._image_folders_widget)
+
         row = QHBoxLayout()
-        browse_btn = QPushButton("폴더 선택...")
-        browse_btn.clicked.connect(self._browse_for_duplicate_images)
-        row.addWidget(browse_btn)
+        add_btn = QPushButton("폴더 추가...")
+        add_btn.clicked.connect(self._add_image_folder)
+        remove_btn = QPushButton("선택 항목 제거")
+        remove_btn.clicked.connect(self._remove_image_folder)
+        scan_btn = QPushButton("검색 시작")
+        scan_btn.setProperty("role", "primary")
+        scan_btn.clicked.connect(self._start_image_scan)
+        row.addWidget(add_btn)
+        row.addWidget(remove_btn)
+        row.addWidget(scan_btn)
         row.addStretch(1)
         layout.addLayout(row)
         return frame
@@ -145,8 +178,12 @@ class CleanupPage(QWidget):
         self._progress_label.setStyleSheet("color: #8c92a4; font-size: 12px;")
         self._progress_bar = QProgressBar()
         self._progress_bar.setVisible(False)
+        self._stop_btn = QPushButton("중지")
+        self._stop_btn.setVisible(False)
+        self._stop_btn.clicked.connect(self._on_stop_clicked)
         layout.addWidget(self._progress_label)
         layout.addWidget(self._progress_bar, 1)
+        layout.addWidget(self._stop_btn)
         return widget
 
     # -- duplicate files ------------------------------------------------
@@ -178,13 +215,29 @@ class CleanupPage(QWidget):
 
     # -- duplicate images -------------------------------------------------
 
-    def _browse_for_duplicate_images(self) -> None:
+    def _add_image_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "폴더 선택")
-        if not folder:
+        if folder:
+            self._apply_add_image_folder(folder)
+
+    def _apply_add_image_folder(self, folder: str) -> None:
+        if folder and folder not in self._image_folders:
+            self._image_folders.append(folder)
+            self._image_folders_widget.addItem(folder)
+
+    def _remove_image_folder(self) -> None:
+        for item in self._image_folders_widget.selectedItems():
+            if item.text() in self._image_folders:
+                self._image_folders.remove(item.text())
+            self._image_folders_widget.takeItem(self._image_folders_widget.row(item))
+
+    def _start_image_scan(self) -> None:
+        if not self._image_folders:
+            QMessageBox.information(self, "폴더 없음", "검색할 폴더를 먼저 추가하세요.")
             return
         self._start_progress("이미지 스캔 중...")
 
-        worker = _ImageScanWorker(folder, self)
+        worker = _ImageScanWorker(list(self._image_folders), self)
         worker.progress.connect(self._on_scan_progress)
         worker.resultReady.connect(self._on_image_scan_ready)
         worker.finished.connect(worker.deleteLater)
@@ -201,7 +254,7 @@ class CleanupPage(QWidget):
     # -- drop zone: the full analyze -> confirm -> execute flow -----------
 
     def _analyze_dropped_path(self, path: str) -> None:
-        self._start_progress("분석 중...")
+        self._start_progress("분석 중...", cancellable=False)
         worker = _AnalyzeWorker(path, self)
         worker.resultReady.connect(self._on_analyze_ready)
         worker.finished.connect(worker.deleteLater)
@@ -229,21 +282,50 @@ class CleanupPage(QWidget):
         self._end_progress()
         QMessageBox.information(self, "삭제 완료", f"{result.deleted_count}개 삭제, {result.failed_count}개 실패")
 
-    # -- shared progress helpers ------------------------------------------
+    # -- shared progress/cancel helpers -------------------------------------
 
-    def _start_progress(self, label: str) -> None:
+    def _start_progress(self, label: str, cancellable: bool = True) -> None:
         self._progress_label.setText(label)
         self._progress_bar.setVisible(True)
         self._progress_bar.setValue(0)
+        self._stop_btn.setVisible(cancellable)
+        self._stop_btn.setEnabled(True)
 
     def _end_progress(self) -> None:
         self._progress_label.setText("")
         self._progress_bar.setVisible(False)
+        self._stop_btn.setVisible(False)
 
     def _on_scan_progress(self, done: int, total: int) -> None:
         if total > 0:
             self._progress_bar.setValue(int(done / total * 100))
         self._progress_label.setText(f"{done}/{total}")
+
+    def _on_stop_clicked(self) -> None:
+        cancel = getattr(self._worker, "cancel", None)
+        if callable(cancel):
+            cancel()
+            self._progress_label.setText("중지 중...")
+            self._stop_btn.setEnabled(False)
+
+    def stop(self) -> None:
+        """Cancels and waits for any in-flight scan/execute worker before
+        the app can safely close - destroying a QThread object while its
+        run() is still executing is undefined behavior in Qt, the same
+        class of crash already fixed for StartupManagerPage (see its
+        stop() docstring). Requests cancellation before waiting, since
+        none of these operations (a big folder scan, a large delete) have
+        a fixed upper bound the way StartupManagerPage's schtasks call
+        does - but every cancellable worker here checks should_cancel()
+        on every file/comparison, so a cancel request should be honored
+        within a moment regardless of how large the overall job is.
+        """
+        if self._worker is None:
+            return
+        cancel = getattr(self._worker, "cancel", None)
+        if callable(cancel):
+            cancel()
+        self._worker.wait(10000)
 
 
 def _section_title(text: str) -> QLabel:

@@ -32,6 +32,7 @@ from PyQt5.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSlider,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -47,6 +48,11 @@ _COL_PATH_A = 1
 _COL_CHECK_B = 2
 _COL_PATH_B = 3
 _COL_SIMILARITY = 4
+
+_BASE_PREVIEW_SIZE = 240
+_ZOOM_MIN_PERCENT = 50
+_ZOOM_MAX_PERCENT = 300
+_ZOOM_DEFAULT_PERCENT = 100
 
 _BATCH_DELETE_OPTIONS = ExecuteOptions(
     kill_locking_processes=False,
@@ -94,6 +100,7 @@ class DuplicateImageManagerDialog(QDialog):
     def __init__(self, pairs: List[ImagePair], parent=None):
         super().__init__(parent)
         self._pairs = list(pairs)
+        self._zoom_percent = _ZOOM_DEFAULT_PERCENT
         self.setWindowTitle("중복/유사 이미지 검토")
         self.resize(900, 560)
 
@@ -124,6 +131,18 @@ class DuplicateImageManagerDialog(QDialog):
         body.addWidget(self._table, 2)
 
         preview_panel = QVBoxLayout()
+        zoom_row = QHBoxLayout()
+        zoom_row.addWidget(QLabel("확대/축소:"))
+        self._zoom_slider = QSlider(Qt.Horizontal)
+        self._zoom_slider.setRange(_ZOOM_MIN_PERCENT, _ZOOM_MAX_PERCENT)
+        self._zoom_slider.setValue(_ZOOM_DEFAULT_PERCENT)
+        self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
+        zoom_row.addWidget(self._zoom_slider, 1)
+        self._zoom_label = QLabel(f"{_ZOOM_DEFAULT_PERCENT}%")
+        self._zoom_label.setFixedWidth(40)
+        zoom_row.addWidget(self._zoom_label)
+        preview_panel.addLayout(zoom_row)
+
         self._preview_a = self._make_preview_label()
         self._preview_b = self._make_preview_label()
         preview_panel.addWidget(self._preview_a)
@@ -151,7 +170,7 @@ class DuplicateImageManagerDialog(QDialog):
     def _make_preview_label() -> QLabel:
         label = QLabel()
         label.setAlignment(Qt.AlignCenter)
-        label.setMinimumSize(200, 200)
+        label.setMinimumSize(_BASE_PREVIEW_SIZE, _BASE_PREVIEW_SIZE)
         label.setStyleSheet("background-color: #0f131d; border-radius: 4px;")
         return label
 
@@ -185,15 +204,20 @@ class DuplicateImageManagerDialog(QDialog):
         self._set_preview(self._preview_a, pair.path_a)
         self._set_preview(self._preview_b, pair.path_b)
 
-    @staticmethod
-    def _set_preview(label: QLabel, path: str) -> None:
+    def _set_preview(self, label: QLabel, path: str) -> None:
         pixmap = QPixmap(path)
         if pixmap.isNull():
             label.setPixmap(QPixmap())
             label.setText(os.path.basename(path))
         else:
             label.setText("")
-            label.setPixmap(pixmap.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            size = int(_BASE_PREVIEW_SIZE * self._zoom_percent / 100)
+            label.setPixmap(pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def _on_zoom_changed(self, value: int) -> None:
+        self._zoom_percent = value
+        self._zoom_label.setText(f"{value}%")
+        self._update_preview()
 
     def _auto_select_by_priority(self) -> None:
         if self._priority_combo.currentIndex() == 0:
