@@ -168,13 +168,19 @@ std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText,
     std::lock_guard<std::mutex> lock(mutex_);
     for (const auto& [frn, entry] : records_) {
         std::wstring path;
+        bool matched;
         if (query.options.matchPath) {
             path = ResolvePathLocked(frn);
-            if (!MatchesQuery(query, entry.name, path, entry.attributes)) continue;
+            matched = MatchesQuery(query, entry.name, path, entry.attributes, entry.size,
+                                    entry.createdTime, entry.modifiedTime, entry.accessedTime);
         } else {
-            if (!MatchesQuery(query, entry.name, std::wstring(), entry.attributes)) continue;
-            path = ResolvePathLocked(frn);
+            matched = MatchesQuery(query, entry.name, std::wstring(), entry.attributes,
+                                    entry.size, entry.createdTime, entry.modifiedTime,
+                                    entry.accessedTime);
+            if (matched) path = ResolvePathLocked(frn);
         }
+        if (!matched) continue;
+
         results.push_back({path, entry.size, entry.modifiedTime, entry.attributes});
         if (results.size() >= maxResults) break;
     }

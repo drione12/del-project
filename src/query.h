@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <windows.h>
@@ -13,11 +14,30 @@ struct MatchOptions {
     bool useRegex = false;
 };
 
+// Comparison used by the numeric/date filter kinds (Size, DateModified, ...).
+// Range means "valueLow <= x < valueHigh".
+enum class CompareOp { Eq, Lt, Le, Gt, Ge, Range };
+
 struct QueryTerm {
-    enum class Kind { Text, Ext, FolderOnly, FileOnly, Attrib };
+    enum class Kind {
+        Text,
+        Ext,
+        FolderOnly,
+        FileOnly,
+        Attrib,
+        Size,
+        DateModified,
+        DateCreated,
+        DateAccessed
+    };
     Kind kind = Kind::Text;
     std::wstring text;
     bool negate = false;
+
+    // Only used by Size/DateModified/DateCreated/DateAccessed.
+    CompareOp op = CompareOp::Eq;
+    uint64_t valueLow = 0;
+    uint64_t valueHigh = 0;  // upper bound, only meaningful when op == Range
 };
 
 struct QueryGroup {
@@ -29,6 +49,9 @@ struct Query {
     MatchOptions options;
 };
 
+// FILETIME values (created/modified/accessed) are each a single 100ns-tick
+// uint64, 0 meaning "unknown" - matching FileEntry/SearchResult elsewhere.
 Query ParseQuery(const std::wstring& raw);
 bool MatchesQuery(const Query& query, const std::wstring& name, const std::wstring& path,
-                   DWORD attributes);
+                   DWORD attributes, uint64_t size, uint64_t createdTime, uint64_t modifiedTime,
+                   uint64_t accessedTime);
