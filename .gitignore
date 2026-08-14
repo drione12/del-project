@@ -7,3 +7,12 @@ CMakeCache.txt
 *.exe
 *.pdb
 *.ilk
+
+# memory_master/ (Python)
+__pycache__/
+*.pyc
+memory_master/build/
+memory_master/dist/
+memory_master/*.spec
+.venv/
+memory_master/.pytest_cache/

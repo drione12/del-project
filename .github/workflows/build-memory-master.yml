@@ -1,0 +1,25 @@
+name: Build Memory Master
+
+on:
+  push:
+    branches: [ claude/everything-search-tool-pdztcu ]
+    paths:
+      - 'memory_master/**'
+      - '.github/workflows/build-memory-master.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r memory_master/requirements.txt pytest
+
+      - name: Run unit tests
+        run: pytest memory_master/tests -v

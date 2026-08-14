@@ -3,6 +3,10 @@ name: Build Windows exe
 on:
   push:
     branches: [ claude/everything-search-tool-pdztcu ]
+    paths:
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 jobs:
