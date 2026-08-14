@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <objbase.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -40,9 +41,9 @@ const wchar_t* kSingleInstanceMutexName = L"EverythingClone_SingleInstance_ceb2f
 const wchar_t* kWindowClassName = L"EverythingCloneWindow";
 
 // Menu command IDs. Menu structure/labels are pulled from the real
-// Everything.exe's own strings (File/Edit/Search/Help are wired to existing
-// functionality; View/Bookmarks show real labels but are disabled - nothing
-// backs them yet. ETP/FTP server items are deliberately omitted from Tools
+// Everything.exe's own strings (File/Edit/Search/View/Help are wired to
+// existing functionality; Bookmarks shows real labels but is disabled -
+// nothing backs it yet. ETP/FTP server items are deliberately omitted from Tools
 // per the user's request.
 enum MenuCommand {
     IDM_FILE_OPEN = 2001,
@@ -58,6 +59,11 @@ enum MenuCommand {
     IDM_SEARCH_MATCHWHOLEWORD,
     IDM_SEARCH_MATCHPATH,
     IDM_SEARCH_REGEX,
+    IDM_VIEW_WINSIZE_SMALL,
+    IDM_VIEW_WINSIZE_MEDIUM,
+    IDM_VIEW_WINSIZE_LARGE,
+    IDM_VIEW_WINSIZE_MAXIMIZE,
+    IDM_VIEW_FONTCOLOR,
     IDM_TOOLS_OPTIONS,
     IDM_HELP_SYNTAX,
     IDM_HELP_ABOUT,
@@ -85,6 +91,7 @@ bool g_matchPath = false;
 bool g_useRegex = false;
 
 NOTIFYICONDATAW g_trayIcon{};
+HFONT g_resultsFont = nullptr;  // owned; replaced (old one deleted) on each font change
 
 // Shows+focuses or hides the main window, shared by tray icon
 // click/double-click and the global show/hide hotkey.
@@ -432,6 +439,104 @@ void ActionProperties(HWND hwnd, const std::wstring& path) {
     ShellExecuteExW(&sei);
 }
 
+// Resizes+centers the main window on its monitor's work area. Restores
+// first if maximized, since SetWindowPos on a zoomed window is a no-op.
+void ApplyWindowSizePreset(HWND hwnd, int width, int height) {
+    if (IsZoomed(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+    RECT workArea{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+    int x = workArea.left + ((workArea.right - workArea.left) - width) / 2;
+    int y = workArea.top + ((workArea.bottom - workArea.top) - height) / 2;
+    SetWindowPos(hwnd, nullptr, x, y, width, height, SWP_NOZORDER);
+}
+
+// Builds an HFONT from saved settings and applies it plus the saved
+// text/background colors to the results list. No-op when settings.valid
+// is false (nothing saved yet) - the control just keeps its normal
+// default appearance.
+void ApplyDisplaySettings(HWND resultsView, const DisplaySettings& s) {
+    if (!s.valid) return;
+
+    LOGFONTW lf{};
+    HDC screenDc = GetDC(nullptr);
+    lf.lfHeight = -MulDiv(s.fontSize, GetDeviceCaps(screenDc, LOGPIXELSY), 72);
+    ReleaseDC(nullptr, screenDc);
+    lf.lfWeight = s.bold ? FW_BOLD : FW_NORMAL;
+    lf.lfItalic = s.italic ? TRUE : FALSE;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfOutPrecision = OUT_DEFAULT_PRECIS;
+    lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
+    lf.lfQuality = DEFAULT_QUALITY;
+    lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
+    wcsncpy_s(lf.lfFaceName, s.fontFace.c_str(), _TRUNCATE);
+
+    HFONT newFont = CreateFontIndirectW(&lf);
+    if (!newFont) return;
+    if (g_resultsFont) DeleteObject(g_resultsFont);
+    g_resultsFont = newFont;
+
+    SendMessageW(resultsView, WM_SETFONT, reinterpret_cast<WPARAM>(g_resultsFont), TRUE);
+    ListView_SetTextColor(resultsView, s.textColor);
+    ListView_SetBkColor(resultsView, s.bgColor);
+    ListView_SetTextBkColor(resultsView, s.bgColor);
+}
+
+// Standard Windows font picker (which itself includes a text-color combo
+// via CF_EFFECTS) followed by a standard color picker for the background -
+// two system dialogs plus an explanatory prompt in between, rather than a
+// custom single dialog with a live preview like real Everything's. A
+// hand-built preview dialog isn't something worth the risk of shipping
+// unverified (see the Options window comment for why).
+void ShowFontAndColorDialog(HWND hwnd) {
+    DisplaySettings current = LoadDisplaySettings();
+
+    LOGFONTW lf{};
+    if (current.valid) {
+        HDC screenDc = GetDC(nullptr);
+        lf.lfHeight = -MulDiv(current.fontSize, GetDeviceCaps(screenDc, LOGPIXELSY), 72);
+        ReleaseDC(nullptr, screenDc);
+        lf.lfWeight = current.bold ? FW_BOLD : FW_NORMAL;
+        lf.lfItalic = current.italic ? TRUE : FALSE;
+        wcsncpy_s(lf.lfFaceName, current.fontFace.c_str(), _TRUNCATE);
+    } else {
+        lf.lfHeight = -12;
+        wcscpy_s(lf.lfFaceName, L"Segoe UI");
+    }
+
+    CHOOSEFONTW cf{};
+    cf.lStructSize = sizeof(cf);
+    cf.hwndOwner = hwnd;
+    cf.lpLogFont = &lf;
+    cf.rgbColors = current.valid ? current.textColor : RGB(0, 0, 0);
+    cf.Flags = CF_SCREENFONTS | CF_EFFECTS | CF_INITTOLOGFONTSTRUCT;
+    if (!ChooseFontW(&cf)) return;
+
+    MessageBoxW(hwnd, L"이제 배경색을 선택하세요.", L"글꼴 및 색", MB_OK | MB_ICONINFORMATION);
+
+    static COLORREF customColors[16] = {};
+    CHOOSECOLORW cc{};
+    cc.lStructSize = sizeof(cc);
+    cc.hwndOwner = hwnd;
+    cc.rgbResult = current.valid ? current.bgColor : RGB(255, 255, 255);
+    cc.lpCustColors = customColors;
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (!ChooseColorW(&cc)) return;
+
+    DisplaySettings s;
+    s.valid = true;
+    s.fontFace = lf.lfFaceName;
+    HDC screenDc = GetDC(nullptr);
+    s.fontSize = -MulDiv(lf.lfHeight, 72, GetDeviceCaps(screenDc, LOGPIXELSY));
+    ReleaseDC(nullptr, screenDc);
+    s.bold = lf.lfWeight >= FW_BOLD;
+    s.italic = lf.lfItalic != 0;
+    s.textColor = cf.rgbColors;
+    s.bgColor = cc.rgbResult;
+
+    SaveDisplaySettings(s);
+    ApplyDisplaySettings(g_resultsView, s);
+}
+
 constexpr int kOptionsListId = 201;
 constexpr int kOptionsAddBtnId = 202;
 constexpr int kOptionsRemoveBtnId = 203;
@@ -535,8 +640,8 @@ void ShowOptionsWindow(HWND owner) {
 }
 
 // Menu structure and labels pulled from the real Everything.exe's own
-// strings. View/Bookmarks show the real labels for visual parity but are
-// disabled - nothing backs them yet. ETP/FTP server items are deliberately
+// strings. Bookmarks shows the real labels for visual parity but is
+// disabled - nothing backs it yet. ETP/FTP server items are deliberately
 // left out of Tools.
 HMENU CreateAppMenu() {
     HMENU menuBar = CreateMenu();
@@ -561,9 +666,15 @@ HMENU CreateAppMenu() {
     AppendMenuW(editMenu, MF_STRING | MF_GRAYED, 0, L"선택 반전(&I)");
     AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(editMenu), L"편집(&E)");
 
+    HMENU winSizeMenu = CreatePopupMenu();
+    AppendMenuW(winSizeMenu, MF_STRING, IDM_VIEW_WINSIZE_SMALL, L"작게 (700 x 560)");
+    AppendMenuW(winSizeMenu, MF_STRING, IDM_VIEW_WINSIZE_MEDIUM, L"보통 (950 x 700)");
+    AppendMenuW(winSizeMenu, MF_STRING, IDM_VIEW_WINSIZE_LARGE, L"크게 (1200 x 850)");
+    AppendMenuW(winSizeMenu, MF_STRING, IDM_VIEW_WINSIZE_MAXIMIZE, L"최대화(&M)");
+
     HMENU viewMenu = CreatePopupMenu();
-    AppendMenuW(viewMenu, MF_STRING | MF_GRAYED, 0, L"창 크기(&W)");
-    AppendMenuW(viewMenu, MF_STRING | MF_GRAYED, 0, L"글꼴 및 색(&N)");
+    AppendMenuW(viewMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(winSizeMenu), L"창 크기(&W)");
+    AppendMenuW(viewMenu, MF_STRING, IDM_VIEW_FONTCOLOR, L"글꼴 및 색(&N)...");
     AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(viewMenu), L"보기(&V)");
 
     HMENU searchMenu = CreatePopupMenu();
@@ -660,6 +771,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             col.cx = 70;
             col.pszText = const_cast<LPWSTR>(L"속성");
             ListView_InsertColumn(g_resultsView, 7, &col);
+
+            ApplyDisplaySettings(g_resultsView, LoadDisplaySettings());
 
             g_trayIcon.cbSize = sizeof(g_trayIcon);
             g_trayIcon.hWnd = hwnd;
@@ -803,6 +916,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     CheckMenuItem(GetMenu(hwnd), IDM_SEARCH_REGEX,
                                   MF_BYCOMMAND | (g_useRegex ? MF_CHECKED : MF_UNCHECKED));
                     RunSearch();
+                    break;
+                case IDM_VIEW_WINSIZE_SMALL:
+                    ApplyWindowSizePreset(hwnd, 700, 560);
+                    break;
+                case IDM_VIEW_WINSIZE_MEDIUM:
+                    ApplyWindowSizePreset(hwnd, 950, 700);
+                    break;
+                case IDM_VIEW_WINSIZE_LARGE:
+                    ApplyWindowSizePreset(hwnd, 1200, 850);
+                    break;
+                case IDM_VIEW_WINSIZE_MAXIMIZE:
+                    ShowWindow(hwnd, SW_MAXIMIZE);
+                    break;
+                case IDM_VIEW_FONTCOLOR:
+                    ShowFontAndColorDialog(hwnd);
                     break;
                 case IDM_TOOLS_OPTIONS:
                     ShowOptionsWindow(hwnd);
@@ -976,6 +1104,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             UnregisterHotKey(hwnd, kShowHideHotkeyId);
             Shell_NotifyIconW(NIM_DELETE, &g_trayIcon);
+            if (g_resultsFont) DeleteObject(g_resultsFont);
             PostQuitMessage(0);
             return 0;
     }

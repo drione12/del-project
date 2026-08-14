@@ -54,3 +54,45 @@ void SaveExcludeFolders(const std::vector<std::wstring>& folders) {
         WritePrivateProfileStringW(L"ExcludeFolders", key, folders[i].c_str(), iniPath.c_str());
     }
 }
+
+DisplaySettings LoadDisplaySettings() {
+    std::wstring iniPath = GetSettingsDirectory() + L"\\" + kSettingsFileName;
+
+    DisplaySettings s;
+    s.valid = GetPrivateProfileIntW(L"Display", L"Valid", 0, iniPath.c_str()) != 0;
+    if (!s.valid) return s;
+
+    wchar_t face[LF_FACESIZE]{};
+    GetPrivateProfileStringW(L"Display", L"FontFace", L"", face, LF_FACESIZE, iniPath.c_str());
+    s.fontFace = face;
+    s.fontSize = GetPrivateProfileIntW(L"Display", L"FontSize", 9, iniPath.c_str());
+    s.bold = GetPrivateProfileIntW(L"Display", L"Bold", 0, iniPath.c_str()) != 0;
+    s.italic = GetPrivateProfileIntW(L"Display", L"Italic", 0, iniPath.c_str()) != 0;
+    s.textColor =
+        static_cast<COLORREF>(GetPrivateProfileIntW(L"Display", L"TextColor", 0, iniPath.c_str()));
+    s.bgColor = static_cast<COLORREF>(
+        GetPrivateProfileIntW(L"Display", L"BgColor", 0x00FFFFFF, iniPath.c_str()));
+
+    // A blank saved face name means the dialog was cancelled mid-save or the
+    // file is corrupt - treat it the same as "nothing saved".
+    if (s.fontFace.empty()) s.valid = false;
+    return s;
+}
+
+void SaveDisplaySettings(const DisplaySettings& settings) {
+    std::wstring iniPath = GetSettingsDirectory() + L"\\" + kSettingsFileName;
+
+    WritePrivateProfileStringW(L"Display", L"Valid", settings.valid ? L"1" : L"0", iniPath.c_str());
+    WritePrivateProfileStringW(L"Display", L"FontFace", settings.fontFace.c_str(), iniPath.c_str());
+
+    wchar_t buf[16];
+    swprintf_s(buf, L"%d", settings.fontSize);
+    WritePrivateProfileStringW(L"Display", L"FontSize", buf, iniPath.c_str());
+    WritePrivateProfileStringW(L"Display", L"Bold", settings.bold ? L"1" : L"0", iniPath.c_str());
+    WritePrivateProfileStringW(L"Display", L"Italic", settings.italic ? L"1" : L"0", iniPath.c_str());
+
+    swprintf_s(buf, L"%lu", static_cast<unsigned long>(settings.textColor));
+    WritePrivateProfileStringW(L"Display", L"TextColor", buf, iniPath.c_str());
+    swprintf_s(buf, L"%lu", static_cast<unsigned long>(settings.bgColor));
+    WritePrivateProfileStringW(L"Display", L"BgColor", buf, iniPath.c_str());
+}
