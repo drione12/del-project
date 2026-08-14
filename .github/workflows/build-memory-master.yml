@@ -52,3 +52,4 @@ jobs:
         with:
           name: MemoryMaster
           path: memory_master/dist/MemoryMaster.exe
+          retention-days: 90

@@ -26,3 +26,4 @@ jobs:
         with:
           name: EverythingClone
           path: build/Release/EverythingClone.exe
+          retention-days: 90
