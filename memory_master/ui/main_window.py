@@ -14,6 +14,7 @@ from __future__ import annotations
 from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 
+from ui.pages.cleanup_page import CleanupPage
 from ui.pages.dashboard_page import DashboardPage
 from ui.pages.placeholder_page import PlaceholderPage
 from ui.sidebar import Sidebar
@@ -87,6 +88,8 @@ class MainWindow(QMainWindow):
     def _make_page(page_id: str, icon_name: str, tooltip: str) -> QWidget:
         if page_id == "dashboard":
             return DashboardPage()
+        if page_id == "cleanup":
+            return CleanupPage()
         return PlaceholderPage(icon_name, tooltip, _PLACEHOLDER_SUBTITLE)
 
     def go_to_page(self, page_id: str) -> None:
