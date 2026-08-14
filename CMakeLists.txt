@@ -23,7 +23,7 @@ add_executable(EverythingClone WIN32
     src/app.rc
 )
 
-target_link_libraries(EverythingClone PRIVATE advapi32 comctl32 shell32 ole32 comdlg32)
+target_link_libraries(EverythingClone PRIVATE advapi32 comctl32 shell32 ole32 comdlg32 uuid)
 
 # MSVC's linker auto-generates and embeds its own default manifest; without
 # disabling that, it collides with the manifest app.rc embeds explicitly

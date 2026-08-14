@@ -381,6 +381,19 @@ bool GetSelectedResult(int& indexOut, std::wstring& pathOut) {
     return true;
 }
 
+// Collects every selected row's path - GetSelectedResult above only ever
+// returns the first, which was fine while the results view was
+// LVS_SINGLESEL but undercounts now that it supports multi-select.
+void GetSelectedResults(std::vector<std::wstring>& pathsOut) {
+    pathsOut.clear();
+    int i = -1;
+    while ((i = ListView_GetNextItem(g_resultsView, i, LVNI_SELECTED)) != -1) {
+        if (static_cast<size_t>(i) < g_results.size()) {
+            pathsOut.push_back(g_results[i].path);
+        }
+    }
+}
+
 void ActionOpen(const std::wstring& path) {
     ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
@@ -404,13 +417,17 @@ void CopyTextToClipboard(HWND hwnd, const std::wstring& text) {
     CloseClipboard();
 }
 
-// Copies the file itself (not just its path text) to the clipboard as a
-// CF_HDROP, so it can be pasted into Explorer like a real Ctrl+C would.
-void ActionCopyAsFileObject(HWND hwnd, const std::wstring& path) {
+// Copies the file(s) themselves (not just path text) to the clipboard as a
+// CF_HDROP, so they can be pasted into Explorer like a real Ctrl+C would -
+// DROPFILES supports any number of items, back to back, each individually
+// null-terminated, with one extra null terminating the whole list.
+void ActionCopyAsFileObject(HWND hwnd, const std::vector<std::wstring>& paths) {
+    if (paths.empty()) return;
     if (!OpenClipboard(hwnd)) return;
     EmptyClipboard();
 
-    size_t charCount = path.size() + 1 /* item terminator */ + 1 /* list terminator */;
+    size_t charCount = 1;  // final list terminator
+    for (auto& p : paths) charCount += p.size() + 1;  // item text + its own terminator
     size_t dropSize = sizeof(DROPFILES) + charCount * sizeof(wchar_t);
     HGLOBAL mem = GlobalAlloc(GHND, dropSize);
     if (mem) {
@@ -418,30 +435,49 @@ void ActionCopyAsFileObject(HWND hwnd, const std::wstring& path) {
         df->pFiles = sizeof(DROPFILES);
         df->fWide = TRUE;
         auto* dst = reinterpret_cast<wchar_t*>(reinterpret_cast<BYTE*>(df) + sizeof(DROPFILES));
-        wcscpy_s(dst, path.size() + 1, path.c_str());
-        // GHND zero-initializes the allocation, so both the per-item and
-        // final list null terminators are already in place.
+        for (auto& p : paths) {
+            wcscpy_s(dst, p.size() + 1, p.c_str());
+            dst += p.size() + 1;
+        }
+        // GHND zero-initializes the allocation, so the final list null
+        // terminator is already in place after the last item's own.
         GlobalUnlock(mem);
         SetClipboardData(CF_HDROP, mem);
     }
     CloseClipboard();
 }
 
-void ActionDelete(HWND hwnd, int index, const std::wstring& path) {
-    std::wstring msg = L"다음을 삭제하시겠습니까?\n\n" + path;
-    if (MessageBoxW(hwnd, msg.c_str(), L"삭제 확인", MB_YESNO | MB_ICONWARNING) != IDYES) return;
+// Recycle-Bin delete for one or more selected items.
+void ActionDelete(HWND hwnd, const std::vector<std::wstring>& paths) {
+    if (paths.empty()) return;
+    std::wstring msg = paths.size() == 1
+                            ? (L"다음을 삭제하시겠습니까?\n\n" + paths[0])
+                            : (L"선택한 " + std::to_wstring(paths.size()) + L"개 항목을 삭제하시겠습니까?");
+    if (MessageBoxW(hwnd, msg.c_str(), L"삭제 확인", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
 
-    std::wstring doubleNull = path + L'\0';
+    std::wstring doubleNull;
+    for (auto& p : paths) {
+        doubleNull += p;
+        doubleNull += L'\0';
+    }
+    doubleNull += L'\0';
+
     SHFILEOPSTRUCTW op{};
     op.hwnd = hwnd;
     op.wFunc = FO_DELETE;
     op.pFrom = doubleNull.c_str();
     op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION;
-    SHFileOperationW(&op);
+    int result = SHFileOperationW(&op);
 
-    g_results.erase(g_results.begin() + index);
-    ListView_SetItemCountEx(g_resultsView, g_results.size(), LVSICF_NOSCROLL);
-    InvalidateRect(g_resultsView, nullptr, FALSE);
+    if (result != 0 || op.fAnyOperationsAborted) {
+        MessageBoxW(hwnd, L"일부 또는 전체 항목을 삭제하지 못했습니다.", L"삭제 실패", MB_OK | MB_ICONERROR);
+    }
+    // Re-run the search rather than assume which specific rows succeeded -
+    // SHFileOperationW doesn't report per-item results for a multi-item
+    // pFrom, and this also fixes the previous version's real bug of
+    // removing every selected row from g_results unconditionally, even on
+    // failure.
+    RunSearch();
 }
 
 void ActionProperties(HWND hwnd, const std::wstring& path) {
@@ -733,7 +769,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             g_resultsView = CreateWindowExW(
                 0, WC_LISTVIEWW, L"",
-                WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA,
                 8, 64, 600, 400, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kResultsId)), nullptr, nullptr);
             ListView_SetExtendedListViewStyle(g_resultsView, LVS_EX_FULLROWSELECT);
@@ -891,18 +927,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case IDM_FILE_PROPERTIES:
                     if (GetSelectedResult(index, path)) ActionProperties(hwnd, path);
                     break;
-                case IDM_FILE_DELETE:
-                    if (GetSelectedResult(index, path)) ActionDelete(hwnd, index, path);
+                case IDM_FILE_DELETE: {
+                    std::vector<std::wstring> paths;
+                    GetSelectedResults(paths);
+                    ActionDelete(hwnd, paths);
                     break;
+                }
                 case IDM_FILE_REFRESH:
                     RunSearch();
                     break;
                 case IDM_FILE_CLOSE:
                     PostMessage(hwnd, WM_CLOSE, 0, 0);
                     break;
-                case IDM_EDIT_COPY:
-                    if (GetSelectedResult(index, path)) ActionCopyAsFileObject(hwnd, path);
+                case IDM_EDIT_COPY: {
+                    std::vector<std::wstring> paths;
+                    GetSelectedResults(paths);
+                    ActionCopyAsFileObject(hwnd, paths);
                     break;
+                }
                 case IDM_SEARCH_MATCHCASE:
                     g_matchCase = !g_matchCase;
                     CheckMenuItem(GetMenu(hwnd), IDM_SEARCH_MATCHCASE,
@@ -1072,7 +1114,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     CopyTextToClipboard(hwnd, path);
                     break;
                 case 4:
-                    ActionDelete(hwnd, selected, path);
+                    ActionDelete(hwnd, {path});
                     break;
                 case 5:
                     ActionProperties(hwnd, path);
@@ -1114,6 +1156,10 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         return 0;
     }
 
+    // Needed for the Shell IContextMenu/IShellFolder and OLE drag-and-drop
+    // (DoDragDrop) work - nothing in this app initialized COM before.
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);
 
@@ -1139,5 +1185,6 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    CoUninitialize();
     return static_cast<int>(msg.wParam);
 }
