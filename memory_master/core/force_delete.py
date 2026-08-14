@@ -43,6 +43,7 @@ from core.critical_processes import is_critical
 from core.logging_setup import get_logger
 from core.ownership import clear_readonly, grant_full_control, take_ownership
 from core.path_guard import is_protected
+from core.winpath import long_path
 
 logger = get_logger(__name__)
 
@@ -100,9 +101,9 @@ def request_admin_restart() -> bool:
 
 
 def _scan(path: str):
-    if os.path.isfile(path):
+    if os.path.isfile(long_path(path)):
         try:
-            return 1, os.path.getsize(path)
+            return 1, os.path.getsize(long_path(path))
         except OSError:
             return 1, 0
 
@@ -112,7 +113,7 @@ def _scan(path: str):
         for name in files:
             file_count += 1
             try:
-                total_bytes += os.path.getsize(os.path.join(root, name))
+                total_bytes += os.path.getsize(long_path(os.path.join(root, name)))
             except OSError:
                 pass
     return file_count, total_bytes
@@ -181,13 +182,14 @@ def _secure_shred_file(path: str) -> None:
     physical flash cells the original data occupied), a caveat the caller
     is expected to show in the UI before this option can be enabled.
     """
+    safe_path = long_path(path)
     try:
-        size = os.path.getsize(path)
+        size = os.path.getsize(safe_path)
     except OSError:
         return
     if size == 0:
         return
-    with open(path, "r+b") as f:
+    with open(safe_path, "r+b") as f:
         for pattern in _SHRED_PASSES:
             f.seek(0)
             f.write(os.urandom(size) if pattern is None else pattern * size)
@@ -226,18 +228,19 @@ def _schedule_delete_on_reboot(path: str) -> bool:
     if not enable_privilege("SeRestorePrivilege"):
         return False
     movefile_delay_until_reboot = 0x4
-    ok = ctypes.windll.kernel32.MoveFileExW(path, None, movefile_delay_until_reboot)
+    ok = ctypes.windll.kernel32.MoveFileExW(long_path(path), None, movefile_delay_until_reboot)
     return bool(ok)
 
 
 def _delete_one(path: str, options: ExecuteOptions, is_dir: bool, is_admin: bool):
+    safe_path = long_path(path)
     try:
         if options.secure_shred and not is_dir:
             _secure_shred_file(path)
         if is_dir:
-            os.rmdir(path)
+            os.rmdir(safe_path)
         else:
-            os.remove(path)
+            os.remove(safe_path)
         return DeleteOutcome.DELETED, ""
     except OSError as first_error:
         if not options.take_ownership_on_failure:
@@ -253,9 +256,9 @@ def _delete_one(path: str, options: ExecuteOptions, is_dir: bool, is_admin: bool
         grant_full_control(path, recurse=False)
         try:
             if is_dir:
-                os.rmdir(path)
+                os.rmdir(safe_path)
             else:
-                os.remove(path)
+                os.remove(safe_path)
             return DeleteOutcome.DELETED, ""
         except OSError as second_error:
             # The reboot-delete fallback (MOVEFILE_DELAY_UNTIL_REBOOT) is
@@ -290,7 +293,7 @@ def execute(
     if options.kill_locking_processes and kill_pids:
         killed_pids = _kill_processes(kill_pids)
 
-    if os.path.isfile(path):
+    if os.path.isfile(long_path(path)):
         entries = [(path, False)]
     else:
         entries = []

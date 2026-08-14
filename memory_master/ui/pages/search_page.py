@@ -1,16 +1,16 @@
-"""File search page ("파일 검색") - an Everything-style search: pick folders
-to index (core/file_search.py's build_index walks them via plain os.walk,
-not a raw NTFS MFT index like the real Everything app or this repo's
-separate C++ EverythingClone - the two apps share no code, see
-memory_master/README.md), then search the in-memory index instantly as you
-type. Results support shift/ctrl multi-select, Del to move selected items
-to the Recycle Bin, and a right-click menu adding a force-delete option
-that reuses the same hardened core/force_delete.py pipeline as the Cleanup
-page's drop zone - single selection reuses that exact analyze/confirm/
-execute flow, multi-selection uses a batch flow with one confirmation and
-no kill-list (mirroring ui/dialogs/duplicate_image_manager.py's existing
-batch-delete precedent), since prompting once per selected file wouldn't
-scale.
+"""File search page ("파일 검색") - an Everything-style search: every fixed
+drive is indexed automatically (core/file_search.py's build_index walks
+them via plain os.walk, not a raw NTFS MFT index like the real Everything
+app or this repo's separate C++ EverythingClone - the two apps share no
+code, see memory_master/README.md), then the in-memory index is searched
+instantly as you type. Results support shift/ctrl multi-select, Del to
+move selected items to the Recycle Bin, a right-click menu adding a
+force-delete option that reuses the same hardened core/force_delete.py
+pipeline as the Cleanup page's drop zone (single selection reuses that
+exact analyze/confirm/execute flow, multi-selection uses a batch flow with
+one confirmation and no kill-list, mirroring
+ui/dialogs/duplicate_image_manager.py's existing batch-delete precedent),
+and a live preview panel for the selected image.
 """
 from __future__ import annotations
 
@@ -19,18 +19,17 @@ import subprocess
 import sys
 from typing import Dict, List, Optional, Tuple
 
+import psutil
 from PyQt5.QtCore import QThread, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QDialog,
-    QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
-    QListWidget,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -41,11 +40,11 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from core.config import load_config, save_config
 from core.file_search import FileEntry, build_index
 from core.file_search import search as search_entries
 from core.force_delete import AnalyzeResult, ExecuteOptions, ExecuteResult, execute
 from core.formatting import format_bytes, format_datetime_kr
+from core.image_scanner import is_image_file
 from core.trash import send_to_trash
 from core.workers import AnalyzeWorker, ExecuteWorker
 from ui.dialogs.confirm_force_delete import ConfirmForceDeleteDialog
@@ -53,7 +52,7 @@ from ui.dialogs.confirm_force_delete import ConfirmForceDeleteDialog
 if sys.platform == "win32":
     from core.icons import get_icon_for_path
 else:
-    def get_icon_for_path(path: str):
+    def get_icon_for_path(path: str, is_dir: bool = False):
         return None
 
 _COL_NAME = 0
@@ -63,6 +62,7 @@ _COL_MODIFIED = 3
 
 _MAX_DISPLAYED_RESULTS = 2000
 _SEARCH_DEBOUNCE_MS = 200
+_PREVIEW_PLACEHOLDER_TEXT = "이미지를 선택하면\n미리보기가 표시됩니다"
 
 _BATCH_FORCE_DELETE_OPTIONS = ExecuteOptions(
     kill_locking_processes=False,
@@ -70,6 +70,25 @@ _BATCH_FORCE_DELETE_OPTIONS = ExecuteOptions(
     secure_shred=False,
     reboot_delete_fallback=True,
 )
+
+
+def _fixed_drive_roots() -> List[str]:
+    """Every currently-mounted drive except optical media (an empty
+    CD/DVD drive can hang or error on enumeration, and isn't useful to
+    index anyway) - this is what "그냥 모든 파일 폴더 보여주는 식" (just show
+    everything) resolves to: no folder picker, whole-machine coverage.
+    """
+    try:
+        partitions = psutil.disk_partitions(all=False)
+    except Exception:
+        return []
+    roots = []
+    for part in partitions:
+        opts = part.opts.split(",") if part.opts else []
+        if "cdrom" in opts:
+            continue
+        roots.append(part.mountpoint)
+    return roots
 
 
 class _ResultsTable(QTableWidget):
@@ -104,6 +123,7 @@ class _IndexWorker(QThread):
             self._roots,
             on_progress=lambda i, n: self.progress.emit(i, n),
             should_cancel=lambda: self._cancel_requested,
+            compute_total=False,  # a whole-drive pre-count would double an already-long walk
         )
         self.resultReady.emit(entries)
 
@@ -152,10 +172,10 @@ class _BatchForceDeleteWorker(QThread):
 class SearchPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._folders: List[str] = []
         self._index: List[FileEntry] = []
         self._by_path: Dict[str, FileEntry] = {}
         self._worker: Optional[QThread] = None  # one at a time, mirrors CleanupPage
+        self._auto_indexed = False  # first showEvent kicks off indexing, not __init__
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -170,7 +190,7 @@ class SearchPage(QWidget):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(16)
 
-        root.addWidget(self._build_folder_section())
+        root.addWidget(self._build_index_section())
         root.addWidget(self._build_search_section(), 1)
 
         self._search_timer = QTimer(self)
@@ -178,31 +198,25 @@ class SearchPage(QWidget):
         self._search_timer.setInterval(_SEARCH_DEBOUNCE_MS)
         self._search_timer.timeout.connect(self._apply_search)
 
-        self._load_saved_folders()
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._auto_indexed:
+            self._auto_indexed = True
+            self._start_indexing()
 
     # -- construction -------------------------------------------------------
 
-    def _build_folder_section(self) -> QFrame:
+    def _build_index_section(self) -> QFrame:
         frame = QFrame()
         frame.setProperty("role", "card")
         layout = QVBoxLayout(frame)
-        layout.addWidget(_section_title("검색 폴더"))
-
-        self._folders_widget = QListWidget()
-        self._folders_widget.setMaximumHeight(100)
-        layout.addWidget(self._folders_widget)
+        layout.addWidget(_section_title("인덱스"))
 
         row = QHBoxLayout()
-        add_btn = QPushButton("폴더 추가...")
-        add_btn.clicked.connect(self._add_folder)
-        remove_btn = QPushButton("선택 항목 제거")
-        remove_btn.clicked.connect(self._remove_folder)
-        self._index_btn = QPushButton("인덱스 생성")
-        self._index_btn.setProperty("role", "primary")
-        self._index_btn.clicked.connect(self._start_indexing)
-        row.addWidget(add_btn)
-        row.addWidget(remove_btn)
-        row.addWidget(self._index_btn)
+        self._reindex_btn = QPushButton("다시 인덱싱")
+        self._reindex_btn.setProperty("role", "primary")
+        self._reindex_btn.clicked.connect(self._start_indexing)
+        row.addWidget(self._reindex_btn)
         row.addStretch(1)
         self._index_status_label = QLabel("")
         self._index_status_label.setStyleSheet("color: #8c92a4; font-size: 12px;")
@@ -217,7 +231,7 @@ class SearchPage(QWidget):
         layout.addWidget(_section_title("검색"))
 
         self._search_box = QLineEdit()
-        self._search_box.setPlaceholderText("인덱스를 먼저 생성하세요")
+        self._search_box.setPlaceholderText("인덱싱 중...")
         self._search_box.setEnabled(False)
         self._search_box.textChanged.connect(self._on_search_text_changed)
         layout.addWidget(self._search_box)
@@ -226,8 +240,12 @@ class SearchPage(QWidget):
         self._results_status_label.setStyleSheet("color: #8c92a4; font-size: 12px;")
         layout.addWidget(self._results_status_label)
 
+        body = QHBoxLayout()
         self._results_table = self._build_results_table()
-        layout.addWidget(self._results_table, 1)
+        body.addWidget(self._results_table, 2)
+        self._preview_label = self._build_preview_label()
+        body.addWidget(self._preview_label, 1)
+        layout.addLayout(body, 1)
         return frame
 
     def _build_results_table(self) -> _ResultsTable:
@@ -245,60 +263,31 @@ class SearchPage(QWidget):
         table.setContextMenuPolicy(Qt.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         table.deleteRequested.connect(self._on_delete_requested)
+        table.itemSelectionChanged.connect(self._update_preview)
         return table
 
-    # -- folder list ----------------------------------------------------
-
-    def _add_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "폴더 선택")
-        if folder:
-            self._apply_add_folder(folder)
-
-    def _apply_add_folder(self, folder: str) -> None:
-        if folder and folder not in self._folders:
-            self._folders.append(folder)
-            self._folders_widget.addItem(folder)
-            self._invalidate_index()
-            self._save_folders()
-
-    def _remove_folder(self) -> None:
-        for item in self._folders_widget.selectedItems():
-            if item.text() in self._folders:
-                self._folders.remove(item.text())
-            self._folders_widget.takeItem(self._folders_widget.row(item))
-        self._invalidate_index()
-        self._save_folders()
-
-    def _load_saved_folders(self) -> None:
-        for folder in load_config().search_folders:
-            if os.path.isdir(folder):
-                self._apply_add_folder(folder)
-
-    def _save_folders(self) -> None:
-        config = load_config()
-        config.search_folders = list(self._folders)
-        save_config(config)
-
-    def _invalidate_index(self) -> None:
-        self._index = []
-        self._by_path = {}
-        self._results_table.setRowCount(0)
-        self._search_box.setEnabled(False)
-        self._search_box.clear()
-        self._search_box.setPlaceholderText("인덱스를 먼저 생성하세요")
-        self._index_status_label.setText("")
-        self._results_status_label.setText("")
+    @staticmethod
+    def _build_preview_label() -> QLabel:
+        label = QLabel(_PREVIEW_PLACEHOLDER_TEXT)
+        label.setAlignment(Qt.AlignCenter)
+        label.setMinimumSize(280, 280)
+        label.setWordWrap(True)
+        label.setStyleSheet("background-color: #0f131d; border-radius: 4px; color: #8c92a4;")
+        return label
 
     # -- indexing ---------------------------------------------------------
 
     def _start_indexing(self) -> None:
-        if not self._folders:
-            QMessageBox.information(self, "폴더 없음", "검색할 폴더를 먼저 추가하세요.")
+        roots = _fixed_drive_roots()
+        if not roots:
+            QMessageBox.warning(self, "드라이브 없음", "검색 가능한 드라이브를 찾지 못했습니다.")
             return
-        self._index_btn.setEnabled(False)
-        self._index_status_label.setText("인덱싱 중...")
+        self._reindex_btn.setEnabled(False)
+        self._search_box.setEnabled(False)
+        self._results_table.setRowCount(0)
+        self._index_status_label.setText("인덱싱 중... (전체 드라이브, 다소 시간이 걸릴 수 있습니다)")
 
-        worker = _IndexWorker(list(self._folders), self)
+        worker = _IndexWorker(roots, self)
         worker.progress.connect(self._on_index_progress)
         worker.resultReady.connect(self._on_index_ready)
         worker.finished.connect(worker.deleteLater)
@@ -308,9 +297,11 @@ class SearchPage(QWidget):
     def _on_index_progress(self, done: int, total: int) -> None:
         if total > 0:
             self._index_status_label.setText(f"인덱싱 중... {done}/{total}")
+        else:
+            self._index_status_label.setText(f"인덱싱 중... {done}개 처리됨")
 
     def _on_index_ready(self, entries: List[FileEntry]) -> None:
-        self._index_btn.setEnabled(True)
+        self._reindex_btn.setEnabled(True)
         self._index = entries
         self._by_path = {e.path: e for e in entries}
         self._index_status_label.setText(f"{len(entries)}개 항목 인덱싱됨")
@@ -335,7 +326,7 @@ class SearchPage(QWidget):
         for row, entry in enumerate(capped):
             name_item = QTableWidgetItem(entry.name)
             name_item.setData(Qt.UserRole, entry.path)
-            pixmap = get_icon_for_path(entry.path)
+            pixmap = get_icon_for_path(entry.path, entry.is_dir)
             if pixmap is not None:
                 name_item.setIcon(QIcon(pixmap))
             table.setItem(row, _COL_NAME, name_item)
@@ -360,6 +351,25 @@ class SearchPage(QWidget):
             if entry is not None:
                 entries.append(entry)
         return entries
+
+    # -- image preview --------------------------------------------------
+
+    def _update_preview(self) -> None:
+        entries = self._selected_entries()
+        if len(entries) == 1 and not entries[0].is_dir and is_image_file(entries[0].path):
+            pixmap = QPixmap(entries[0].path)
+            if not pixmap.isNull():
+                box = self._preview_label.size()
+                if box.width() < 10 or box.height() < 10:
+                    # Layout may not have settled yet (e.g. right after the
+                    # page's very first show) - the label's own minimum
+                    # size is a reliable floor since it was set explicitly,
+                    # not derived from a layout pass that may not have run.
+                    box = self._preview_label.minimumSize()
+                self._preview_label.setPixmap(pixmap.scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                return
+        self._preview_label.setPixmap(QPixmap())
+        self._preview_label.setText(_PREVIEW_PLACEHOLDER_TEXT)
 
     # -- Del key / context menu --------------------------------------------
 
@@ -513,20 +523,38 @@ class SearchPage(QWidget):
         self._apply_search()
 
     def _set_busy(self, busy: bool) -> None:
-        self._index_btn.setEnabled(not busy)
+        self._reindex_btn.setEnabled(not busy)
         self._results_table.setEnabled(not busy)
 
     def stop(self) -> None:
         """Cancels and waits for any in-flight worker before the app can
         safely close - same reasoning as CleanupPage.stop() (destroying a
-        live QThread is undefined behavior in Qt).
+        live QThread is undefined behavior in Qt). Matters even more here
+        than most pages: a whole-drive index is the single largest, longest
+        background job in this app, so a user closing the app mid-index is
+        an expected, not edge-case, path through this method.
+
+        The RuntimeError guard covers a real, confirmed-reachable case: a
+        worker that already finished (every worker here connects
+        finished -> deleteLater) has its underlying Qt object destroyed the
+        next time the event loop runs - which, in a long-running real app,
+        has near-certainly already happened by the time the user gets
+        around to closing it. self._worker is then a dangling wrapper
+        around a deleted object; touching it (getattr included - sip
+        raises RuntimeError, not AttributeError, so getattr's own default
+        doesn't catch it) raises instead of behaving like None. There's
+        nothing to cancel or wait for in that case anyway, so treating it
+        as a no-op is correct, not just a workaround.
         """
         if self._worker is None:
             return
-        cancel = getattr(self._worker, "cancel", None)
-        if callable(cancel):
-            cancel()
-        self._worker.wait(10000)
+        try:
+            cancel = getattr(self._worker, "cancel", None)
+            if callable(cancel):
+                cancel()
+            self._worker.wait(10000)
+        except RuntimeError:
+            pass
 
 
 def _open_path(path: str) -> None:

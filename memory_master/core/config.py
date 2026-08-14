@@ -12,8 +12,8 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass, field
-from typing import List, Optional
+from dataclasses import asdict, dataclass
+from typing import Optional
 
 from core.logging_setup import get_logger
 
@@ -42,17 +42,12 @@ class AppConfig:
     always_on_top: bool = False
     opacity: float = 1.0
     quarantine_dir: Optional[str] = None  # None = core/quarantine.py's default
-    search_folders: List[str] = field(default_factory=list)  # 파일 검색 page's folder list
 
     def clamped(self) -> "AppConfig":
         theme = self.theme if self.theme in _VALID_THEMES else "dark"
         opacity = max(_MIN_OPACITY, min(_MAX_OPACITY, self.opacity))
         return AppConfig(
-            theme=theme,
-            always_on_top=self.always_on_top,
-            opacity=opacity,
-            quarantine_dir=self.quarantine_dir,
-            search_folders=list(self.search_folders),
+            theme=theme, always_on_top=self.always_on_top, opacity=opacity, quarantine_dir=self.quarantine_dir
         )
 
 
@@ -66,7 +61,6 @@ def load_config(path: Optional[str] = None) -> AppConfig:
             always_on_top=bool(data.get("always_on_top", False)),
             opacity=float(data.get("opacity", 1.0)),
             quarantine_dir=data.get("quarantine_dir"),
-            search_folders=list(data.get("search_folders", [])),
         ).clamped()
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return AppConfig()

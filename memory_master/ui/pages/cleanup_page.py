@@ -319,13 +319,25 @@ class CleanupPage(QWidget):
         does - but every cancellable worker here checks should_cancel()
         on every file/comparison, so a cancel request should be honored
         within a moment regardless of how large the overall job is.
+
+        Also guards against a worker that already finished: every worker
+        here connects finished -> deleteLater, and by the time a real,
+        long-running app actually closes, that deferred deletion has
+        almost certainly already run - leaving self._worker a dangling
+        wrapper whose attributes (getattr included; sip raises
+        RuntimeError, not AttributeError, so getattr's default doesn't
+        catch it) raise instead of behaving like None. Nothing to cancel
+        or wait for in that case, so treating it as a no-op is correct.
         """
         if self._worker is None:
             return
-        cancel = getattr(self._worker, "cancel", None)
-        if callable(cancel):
-            cancel()
-        self._worker.wait(10000)
+        try:
+            cancel = getattr(self._worker, "cancel", None)
+            if callable(cancel):
+                cancel()
+            self._worker.wait(10000)
+        except RuntimeError:
+            pass
 
 
 def _section_title(text: str) -> QLabel:

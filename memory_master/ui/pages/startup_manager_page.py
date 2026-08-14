@@ -189,6 +189,16 @@ class StartupManagerPage(QWidget):
         behavior in Qt, not just a missed cleanup - the timeout here is
         set past _query_scheduled_tasks()'s own 30s subprocess timeout so
         a legitimately slow-but-finishing scan isn't cut short.
+
+        Also guards against the scan already having finished: the worker
+        connects finished -> deleteLater, and since this page's scan starts
+        at launch and typically finishes within seconds, the deferred
+        deletion has almost certainly already run by the time a real app
+        session actually closes - leaving self._worker a dangling wrapper
+        whose .wait() raises RuntimeError instead of just being a no-op.
         """
         if self._worker is not None:
-            self._worker.wait(35000)
+            try:
+                self._worker.wait(35000)
+            except RuntimeError:
+                pass

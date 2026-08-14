@@ -17,6 +17,8 @@ import os
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
+from core.winpath import long_path
+
 
 @dataclass
 class FileEntry:
@@ -38,6 +40,7 @@ def build_index(
     roots: List[str],
     on_progress: Optional[Callable[[int, int], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    compute_total: bool = True,
 ) -> List[FileEntry]:
     """Walks every root and returns one FileEntry per file/directory found,
     de-duplicated by path so two overlapping/nested chosen roots can't list
@@ -45,8 +48,14 @@ def build_index(
     _list_images). Directories get size_bytes=0 rather than a recursive sum
     of their contents - that would turn indexing into a nested walk per
     folder, reintroducing the cost this feature exists to avoid.
+
+    compute_total exists because the progress total is itself a full extra
+    walk (_count_entries) before the real one - negligible for a small
+    chosen folder, but doubles the cost of a whole-drive walk. Callers
+    indexing at that scale pass compute_total=False and just get a live
+    "done" count with total staying 0.
     """
-    total = sum(_count_entries(root) for root in roots) if on_progress else 0
+    total = sum(_count_entries(root) for root in roots) if (on_progress and compute_total) else 0
     done = 0
     by_path: Dict[str, FileEntry] = {}
 
@@ -59,7 +68,7 @@ def build_index(
 
                 path = os.path.join(dirpath, name)
                 try:
-                    st = os.stat(path)
+                    st = os.stat(long_path(path))
                     size_bytes = 0 if is_dir else st.st_size
                     modified_at = st.st_mtime
                 except OSError:

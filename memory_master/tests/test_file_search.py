@@ -73,6 +73,20 @@ def test_build_index_progress_callback_invoked():
         assert calls == [(1, 1)]
 
 
+def test_build_index_compute_total_false_reports_zero_total():
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "a.txt"), "wb") as f:
+            f.write(b"x")
+        with open(os.path.join(tmp, "b.txt"), "wb") as f:
+            f.write(b"y")
+
+        calls = []
+        entries = build_index([tmp], on_progress=lambda i, n: calls.append((i, n)), compute_total=False)
+
+        assert len(entries) == 2
+        assert calls == [(1, 0), (2, 0)]
+
+
 def test_build_index_respects_cancel():
     with tempfile.TemporaryDirectory() as tmp:
         for i in range(10):
