@@ -19,6 +19,7 @@ from ui.pages.dashboard_page import DashboardPage
 from ui.pages.placeholder_page import PlaceholderPage
 from ui.pages.protection_page import ProtectionPage
 from ui.pages.settings_page import SettingsPage
+from ui.pages.startup_manager_page import StartupManagerPage
 from ui.sidebar import Sidebar
 from ui.title_bar import TitleBar
 from ui.tray import setup_tray
@@ -96,6 +97,8 @@ class MainWindow(QMainWindow):
             return ProtectionPage()
         if page_id == "settings":
             return SettingsPage()
+        if page_id == "startup":
+            return StartupManagerPage()
         return PlaceholderPage(icon_name, tooltip, _PLACEHOLDER_SUBTITLE)
 
     def go_to_page(self, page_id: str) -> None:
