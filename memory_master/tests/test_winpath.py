@@ -24,8 +24,14 @@ def test_noop_off_windows():
 
 
 def test_defaults_to_real_sys_platform():
-    # This test runs on Linux, so the un-overridden default must be a no-op.
-    assert long_path(r"C:\Users\a\file.txt") == r"C:\Users\a\file.txt"
+    # True on any host OS by construction, since long_path's `platform` kwarg
+    # defaults to sys.platform - this checks the wiring, not a specific
+    # platform's behavior (test_prefixes_local_path_on_windows /
+    # test_noop_off_windows already cover platform="win32"/"linux" explicitly).
+    # A hardcoded "must be a no-op" assertion here is what broke CI: this
+    # exact test also runs on the real windows-latest runner, where
+    # sys.platform genuinely is "win32" and long_path correctly does prefix.
+    assert long_path(r"C:\Users\a\file.txt") == long_path(r"C:\Users\a\file.txt", platform=sys.platform)
 
 
 def test_empty_path_returned_unchanged():
