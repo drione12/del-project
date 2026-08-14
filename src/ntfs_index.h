@@ -26,7 +26,7 @@ struct SearchResult {
 class NtfsIndex {
 public:
     bool BuildFromVolume(wchar_t driveLetter, std::wstring& errorOut);
-    void ApplyUsnRecord(const USN_RECORD* record);
+    void ApplyUsnRecord(const USN_RECORD* record, HANDLE hVolume);
 
     std::vector<SearchResult> Search(const std::wstring& query, size_t maxResults) const;
     size_t Count() const;

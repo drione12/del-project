@@ -7,6 +7,17 @@
 
 namespace {
 constexpr size_t kEnumBufferSize = 64 * 1024;
+
+// Reasons that can plausibly change size/dates (or mean this is a brand-new
+// entry) - worth the blocking FSCTL_GET_NTFS_FILE_RECORD call. Purely
+// cosmetic changes (ACL/security, encryption, compression, object id,
+// alternate-stream writes) are deliberately excluded so a write-heavy file
+// (e.g. a log being appended to) doesn't hammer the volume with a raw MFT
+// read on every single journal record.
+constexpr DWORD kMftRefreshReasonMask =
+    USN_REASON_FILE_CREATE | USN_REASON_DATA_OVERWRITE | USN_REASON_DATA_EXTEND |
+    USN_REASON_DATA_TRUNCATION | USN_REASON_BASIC_INFO_CHANGE |
+    USN_REASON_RENAME_NEW_NAME | USN_REASON_HARD_LINK_CHANGE;
 }
 
 bool NtfsIndex::BuildFromVolume(wchar_t driveLetter, std::wstring& errorOut) {
@@ -125,14 +136,13 @@ std::wstring NtfsIndex::ResolvePathLocked(uint64_t frn) const {
     return full;
 }
 
-void NtfsIndex::ApplyUsnRecord(const USN_RECORD* record) {
+void NtfsIndex::ApplyUsnRecord(const USN_RECORD* record, HANDLE hVolume) {
     std::wstring name(reinterpret_cast<const wchar_t*>(
                            reinterpret_cast<const BYTE*>(record) + record->FileNameOffset),
                        record->FileNameLength / sizeof(wchar_t));
 
-    std::lock_guard<std::mutex> lock(mutex_);
-
     if (record->Reason & USN_REASON_FILE_DELETE) {
+        std::lock_guard<std::mutex> lock(mutex_);
         records_.erase(record->FileReferenceNumber);
         pathCache_.erase(record->FileReferenceNumber);
         return;
@@ -140,12 +150,39 @@ void NtfsIndex::ApplyUsnRecord(const USN_RECORD* record) {
 
     bool isDirectory = (record->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     bool isRename = (record->Reason & (USN_REASON_RENAME_NEW_NAME | USN_REASON_RENAME_OLD_NAME)) != 0;
+    bool refreshMft = (record->Reason & kMftRefreshReasonMask) != 0;
 
     FileEntry entry;
     entry.frn = record->FileReferenceNumber;
     entry.parentFrn = record->ParentFileReferenceNumber;
     entry.name = name;
     entry.attributes = record->FileAttributes;
+
+    // Read outside the lock, same as the initial volume scan - this is a
+    // blocking DeviceIoControl call and shouldn't hold up a concurrent
+    // Search() on the UI thread.
+    if (refreshMft) {
+        MftRecordInfo mftInfo = ReadMftRecordInfo(hVolume, entry.frn);
+        if (mftInfo.valid) {
+            entry.size = mftInfo.size;
+            entry.createdTime = mftInfo.createdTime;
+            entry.modifiedTime = mftInfo.modifiedTime;
+            entry.accessedTime = mftInfo.accessedTime;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!refreshMft) {
+        // This reason doesn't imply size/dates changed - keep whatever we
+        // already had cached instead of clobbering it back to unknown.
+        auto it = records_.find(entry.frn);
+        if (it != records_.end()) {
+            entry.size = it->second.size;
+            entry.createdTime = it->second.createdTime;
+            entry.modifiedTime = it->second.modifiedTime;
+            entry.accessedTime = it->second.accessedTime;
+        }
+    }
     records_[entry.frn] = entry;
 
     if (isRename && isDirectory) {

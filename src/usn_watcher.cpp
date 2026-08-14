@@ -67,7 +67,7 @@ void UsnWatcher::WatchLoop(wchar_t driveLetter, NtfsIndex& index, std::atomic<bo
         while (cursor < end) {
             auto* record = reinterpret_cast<PUSN_RECORD>(cursor);
             if (record->RecordLength == 0) break;
-            index.ApplyUsnRecord(record);
+            index.ApplyUsnRecord(record, hVol);
             cursor += record->RecordLength;
         }
 
