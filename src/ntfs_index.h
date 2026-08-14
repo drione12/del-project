@@ -30,9 +30,24 @@ public:
     bool BuildFromVolume(wchar_t driveLetter, std::wstring& errorOut);
     void ApplyUsnRecord(const USN_RECORD* record, HANDLE hVolume);
 
-    std::vector<SearchResult> Search(const std::wstring& query, size_t maxResults) const;
+    std::vector<SearchResult> Search(const std::wstring& query, size_t maxResults,
+                                      const std::vector<std::wstring>& excludeFolders = {}) const;
     size_t Count() const;
     wchar_t Drive() const { return driveLetter_; }
+
+    // Serializes records_ to filePath, tagged with the volume's current USN
+    // journal position so a future LoadFromFile can catch up on whatever
+    // changed while the app wasn't running instead of trusting stale data.
+    bool SaveToFile(const std::wstring& filePath) const;
+
+    // Loads a previously-saved snapshot. Returns false (leaving this index
+    // untouched) if the file is missing, corrupt, or from an incompatible
+    // version - callers should fall back to BuildFromVolume. On success,
+    // savedJournalIdOut/savedUsnOut receive the journal position the caller
+    // needs to catch up from (see UsnWatcher::CatchUp) before the snapshot
+    // can be trusted as current.
+    bool LoadFromFile(const std::wstring& filePath, wchar_t driveLetter,
+                       DWORDLONG& savedJournalIdOut, USN& savedUsnOut);
 
 private:
     std::wstring ResolvePathLocked(uint64_t frn) const;

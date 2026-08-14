@@ -47,6 +47,38 @@ std::unordered_set<uint64_t> BuildDupeSet(const std::unordered_map<uint64_t, Fil
 
 bool NeverSkip(const FileEntry&) { return false; }
 
+constexpr uint32_t kIndexFileMagic = 0x58444945;  // "EIDX" (little-endian on disk)
+constexpr uint32_t kIndexFileVersion = 1;
+
+// Small enough to be its own helper rather than pulling in usn_watcher.h
+// (which depends on ntfs_index.h - keeping the dependency one-directional).
+bool QueryJournalPosition(HANDLE hVolume, DWORDLONG& journalIdOut, USN& nextUsnOut) {
+    USN_JOURNAL_DATA_V0 data{};
+    DWORD bytesReturned = 0;
+    if (!DeviceIoControl(hVolume, FSCTL_QUERY_USN_JOURNAL, nullptr, 0, &data, sizeof(data),
+                          &bytesReturned, nullptr)) {
+        return false;
+    }
+    journalIdOut = data.UsnJournalID;
+    nextUsnOut = data.NextUsn;
+    return true;
+}
+
+// Case-insensitive "is path inside folder" with a path-separator boundary
+// check, so excluding "C:\Temp" doesn't also exclude "C:\TempFiles".
+bool IsUnderFolder(const std::wstring& path, const std::wstring& folder) {
+    if (path.size() < folder.size()) return false;
+    if (_wcsnicmp(path.c_str(), folder.c_str(), folder.size()) != 0) return false;
+    return path.size() == folder.size() || path[folder.size()] == L'\\';
+}
+
+bool IsUnderAnyFolder(const std::wstring& path, const std::vector<std::wstring>& folders) {
+    for (const auto& folder : folders) {
+        if (IsUnderFolder(path, folder)) return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 bool NtfsIndex::BuildFromVolume(wchar_t driveLetter, std::wstring& errorOut) {
@@ -223,8 +255,8 @@ void NtfsIndex::ApplyUsnRecord(const USN_RECORD* record, HANDLE hVolume) {
     }
 }
 
-std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText,
-                                             size_t maxResults) const {
+std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText, size_t maxResults,
+                                             const std::vector<std::wstring>& excludeFolders) const {
     std::vector<SearchResult> results;
     if (queryText.empty()) return results;
 
@@ -312,6 +344,7 @@ std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText,
             if (matched) path = ResolvePathLocked(frn);
         }
         if (!matched) continue;
+        if (!excludeFolders.empty() && IsUnderAnyFolder(path, excludeFolders)) continue;
 
         results.push_back(
             {path, entry.size, entry.createdTime, entry.modifiedTime, entry.accessedTime, entry.attributes});
@@ -323,4 +356,105 @@ std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText,
 size_t NtfsIndex::Count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return records_.size();
+}
+
+bool NtfsIndex::SaveToFile(const std::wstring& filePath) const {
+    wchar_t volumePath[8];
+    swprintf_s(volumePath, L"\\\\.\\%c:", driveLetter_);
+    HANDLE hVol = CreateFileW(volumePath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hVol == INVALID_HANDLE_VALUE) return false;
+
+    DWORDLONG journalId = 0;
+    USN nextUsn = 0;
+    bool gotJournal = QueryJournalPosition(hVol, journalId, nextUsn);
+    CloseHandle(hVol);
+    if (!gotJournal) return false;
+
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, filePath.c_str(), L"wb") != 0 || !f) return false;
+
+    fwrite(&kIndexFileMagic, sizeof(kIndexFileMagic), 1, f);
+    fwrite(&kIndexFileVersion, sizeof(kIndexFileVersion), 1, f);
+    fwrite(&rootFrn_, sizeof(rootFrn_), 1, f);
+    fwrite(&journalId, sizeof(journalId), 1, f);
+    fwrite(&nextUsn, sizeof(nextUsn), 1, f);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint64_t count = records_.size();
+    fwrite(&count, sizeof(count), 1, f);
+    for (const auto& [frn, entry] : records_) {
+        fwrite(&entry.frn, sizeof(entry.frn), 1, f);
+        fwrite(&entry.parentFrn, sizeof(entry.parentFrn), 1, f);
+        fwrite(&entry.attributes, sizeof(entry.attributes), 1, f);
+        fwrite(&entry.size, sizeof(entry.size), 1, f);
+        fwrite(&entry.createdTime, sizeof(entry.createdTime), 1, f);
+        fwrite(&entry.modifiedTime, sizeof(entry.modifiedTime), 1, f);
+        fwrite(&entry.accessedTime, sizeof(entry.accessedTime), 1, f);
+        uint32_t nameLen = static_cast<uint32_t>(entry.name.size());
+        fwrite(&nameLen, sizeof(nameLen), 1, f);
+        if (nameLen > 0) fwrite(entry.name.data(), sizeof(wchar_t), nameLen, f);
+    }
+
+    fclose(f);
+    return true;
+}
+
+bool NtfsIndex::LoadFromFile(const std::wstring& filePath, wchar_t driveLetter,
+                              DWORDLONG& savedJournalIdOut, USN& savedUsnOut) {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, filePath.c_str(), L"rb") != 0 || !f) return false;
+
+    uint32_t magic = 0, version = 0;
+    uint64_t rootFrn = 0;
+    DWORDLONG journalId = 0;
+    USN nextUsn = 0;
+    uint64_t count = 0;
+    bool ok = fread(&magic, sizeof(magic), 1, f) == 1 && magic == kIndexFileMagic &&
+              fread(&version, sizeof(version), 1, f) == 1 && version == kIndexFileVersion &&
+              fread(&rootFrn, sizeof(rootFrn), 1, f) == 1 &&
+              fread(&journalId, sizeof(journalId), 1, f) == 1 &&
+              fread(&nextUsn, sizeof(nextUsn), 1, f) == 1 &&
+              fread(&count, sizeof(count), 1, f) == 1;
+
+    // 64MB record-count sanity bound: a snapshot for a real volume is never
+    // remotely this large, so this only rejects a corrupt/truncated file
+    // rather than attempting a huge reserve() off garbage bytes.
+    if (ok && count > (64ull << 20)) ok = false;
+
+    std::unordered_map<uint64_t, FileEntry> loaded;
+    if (ok) {
+        loaded.reserve(static_cast<size_t>(count));
+        for (uint64_t i = 0; ok && i < count; i++) {
+            FileEntry entry;
+            uint32_t nameLen = 0;
+            ok = fread(&entry.frn, sizeof(entry.frn), 1, f) == 1 &&
+                 fread(&entry.parentFrn, sizeof(entry.parentFrn), 1, f) == 1 &&
+                 fread(&entry.attributes, sizeof(entry.attributes), 1, f) == 1 &&
+                 fread(&entry.size, sizeof(entry.size), 1, f) == 1 &&
+                 fread(&entry.createdTime, sizeof(entry.createdTime), 1, f) == 1 &&
+                 fread(&entry.modifiedTime, sizeof(entry.modifiedTime), 1, f) == 1 &&
+                 fread(&entry.accessedTime, sizeof(entry.accessedTime), 1, f) == 1 &&
+                 fread(&nameLen, sizeof(nameLen), 1, f) == 1;
+            if (ok && nameLen > 32768) ok = false;  // sanity bound, see above
+            if (ok && nameLen > 0) {
+                entry.name.resize(nameLen);
+                ok = fread(&entry.name[0], sizeof(wchar_t), nameLen, f) == nameLen;
+            }
+            if (ok) loaded[entry.frn] = std::move(entry);
+        }
+    }
+
+    fclose(f);
+    if (!ok) return false;
+
+    driveLetter_ = driveLetter;
+    rootFrn_ = rootFrn;
+    savedJournalIdOut = journalId;
+    savedUsnOut = nextUsn;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    records_ = std::move(loaded);
+    pathCache_.clear();
+    return true;
 }

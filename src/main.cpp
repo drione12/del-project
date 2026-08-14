@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <objbase.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <winioctl.h>
@@ -20,6 +21,7 @@
 
 #include "ntfs_index.h"
 #include "privileges.h"
+#include "settings.h"
 #include "text_match.h"
 #include "usn_watcher.h"
 #include "volume_utils.h"
@@ -39,9 +41,9 @@ const wchar_t* kWindowClassName = L"EverythingCloneWindow";
 
 // Menu command IDs. Menu structure/labels are pulled from the real
 // Everything.exe's own strings (File/Edit/Search/Help are wired to existing
-// functionality; View/Bookmarks/Tools show real labels but are disabled -
-// nothing backs them yet. ETP/FTP server items are deliberately omitted
-// from Tools per the user's request.
+// functionality; View/Bookmarks show real labels but are disabled - nothing
+// backs them yet. ETP/FTP server items are deliberately omitted from Tools
+// per the user's request.
 enum MenuCommand {
     IDM_FILE_OPEN = 2001,
     IDM_FILE_OPENPATH,
@@ -56,6 +58,7 @@ enum MenuCommand {
     IDM_SEARCH_MATCHWHOLEWORD,
     IDM_SEARCH_MATCHPATH,
     IDM_SEARCH_REGEX,
+    IDM_TOOLS_OPTIONS,
     IDM_HELP_SYNTAX,
     IDM_HELP_ABOUT,
     IDM_TRAY_SHOW,
@@ -71,6 +74,7 @@ HWND g_resultsView = nullptr;
 int g_sortColumn = 0;  // 0 = Name, 1 = Path, 2 = Size, 3 = Date modified
 bool g_sortAscending = true;
 std::unordered_map<std::wstring, int> g_iconCache;  // extension (or a sentinel) -> icon index
+std::vector<std::wstring> g_excludeFolders;  // hidden from results, see settings.h
 
 // Persistent search toggles set from the Search menu - applied to every
 // search regardless of what's typed, matching real Everything's checkable
@@ -265,7 +269,7 @@ std::vector<SearchResult> SearchAll(const std::wstring& query) {
     std::vector<SearchResult> results;
     for (auto& volume : g_volumes) {
         if (results.size() >= kMaxResults) break;
-        auto partial = volume->Search(query, kMaxResults - results.size());
+        auto partial = volume->Search(query, kMaxResults - results.size(), g_excludeFolders);
         results.insert(results.end(), partial.begin(), partial.end());
     }
     return results;
@@ -316,8 +320,21 @@ void IndexingThread(HWND hwnd) {
     std::vector<std::thread> buildThreads;
     for (size_t i = 0; i < drives.size(); i++) {
         buildThreads.emplace_back([i, &drives]() {
-            std::wstring error;
-            g_volumes[i]->BuildFromVolume(drives[i], error);
+            // A saved snapshot from a clean previous exit plus a bounded USN
+            // catch-up read is much cheaper than a full MFT re-enumeration -
+            // fall back to that full scan only if there's no snapshot, it's
+            // corrupt, or its journal position can no longer be trusted
+            // (journal reset while the app was closed).
+            DWORDLONG savedJournalId = 0;
+            USN savedUsn = 0;
+            bool usedSnapshot =
+                g_volumes[i]->LoadFromFile(GetIndexFilePath(drives[i]), drives[i], savedJournalId,
+                                            savedUsn) &&
+                UsnWatcher::CatchUp(drives[i], *g_volumes[i], savedJournalId, savedUsn);
+            if (!usedSnapshot) {
+                std::wstring error;
+                g_volumes[i]->BuildFromVolume(drives[i], error);
+            }
         });
     }
     for (auto& t : buildThreads) t.join();
@@ -415,10 +432,112 @@ void ActionProperties(HWND hwnd, const std::wstring& path) {
     ShellExecuteExW(&sei);
 }
 
+constexpr int kOptionsListId = 201;
+constexpr int kOptionsAddBtnId = 202;
+constexpr int kOptionsRemoveBtnId = 203;
+HWND g_optionsWnd = nullptr;
+
+void RefreshOptionsList(HWND listBox) {
+    SendMessageW(listBox, LB_RESETCONTENT, 0, 0);
+    for (auto& folder : g_excludeFolders) {
+        SendMessageW(listBox, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(folder.c_str()));
+    }
+}
+
+// Minimal options window: manage the exclude-folder list (settings.h).
+// Modeless (not a true modal dialog) and mouse-only (no IsDialogMessage
+// Tab-navigation) to keep this a plain owned CreateWindowExW window like
+// the main one, rather than a hand-built DLGTEMPLATE - there's no .rc
+// dialog resource to author, and this can't be runtime-tested locally
+// before shipping.
+LRESULT CALLBACK OptionsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_CREATE: {
+            CreateWindowExW(0, L"STATIC", L"검색 결과에서 숨길 폴더:", WS_CHILD | WS_VISIBLE, 8,
+                             8, 360, 18, hwnd, nullptr, nullptr, nullptr);
+            HWND list = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY, 8, 28, 360, 160, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOptionsListId)), nullptr, nullptr);
+            RefreshOptionsList(list);
+            CreateWindowExW(
+                0, L"BUTTON", L"폴더 추가...(&A)", WS_CHILD | WS_VISIBLE, 8, 196, 120, 28, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOptionsAddBtnId)), nullptr, nullptr);
+            CreateWindowExW(
+                0, L"BUTTON", L"제거(&R)", WS_CHILD | WS_VISIBLE, 136, 196, 120, 28, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOptionsRemoveBtnId)), nullptr,
+                nullptr);
+            return 0;
+        }
+        case WM_COMMAND: {
+            HWND list = GetDlgItem(hwnd, kOptionsListId);
+            if (LOWORD(wParam) == kOptionsAddBtnId) {
+                wchar_t pathBuf[MAX_PATH]{};
+                wchar_t displayName[MAX_PATH]{};
+                BROWSEINFOW bi{};
+                bi.hwndOwner = hwnd;
+                bi.pszDisplayName = displayName;
+                bi.lpszTitle = L"검색 결과에서 숨길 폴더를 선택하세요";
+                bi.ulFlags = BIF_RETURNONLYFSDIRS;
+                LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+                if (pidl) {
+                    if (SHGetPathFromIDListW(pidl, pathBuf)) {
+                        g_excludeFolders.emplace_back(pathBuf);
+                        SaveExcludeFolders(g_excludeFolders);
+                        RefreshOptionsList(list);
+                    }
+                    CoTaskMemFree(pidl);
+                }
+            } else if (LOWORD(wParam) == kOptionsRemoveBtnId) {
+                int sel = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
+                if (sel != LB_ERR && static_cast<size_t>(sel) < g_excludeFolders.size()) {
+                    g_excludeFolders.erase(g_excludeFolders.begin() + sel);
+                    SaveExcludeFolders(g_excludeFolders);
+                    RefreshOptionsList(list);
+                }
+            }
+            return 0;
+        }
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_DESTROY:
+            g_optionsWnd = nullptr;
+            return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void ShowOptionsWindow(HWND owner) {
+    if (g_optionsWnd) {
+        SetForegroundWindow(g_optionsWnd);
+        return;
+    }
+
+    static bool classRegistered = false;
+    if (!classRegistered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = OptionsWndProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"EverythingCloneOptionsWindow";
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        RegisterClassExW(&wc);
+        classRegistered = true;
+    }
+
+    g_optionsWnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"EverythingCloneOptionsWindow", L"옵션",
+                                    WS_POPUP | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT,
+                                    CW_USEDEFAULT, 392, 270, owner, nullptr,
+                                    GetModuleHandleW(nullptr), nullptr);
+    if (g_optionsWnd) ShowWindow(g_optionsWnd, SW_SHOW);
+}
+
 // Menu structure and labels pulled from the real Everything.exe's own
-// strings. View/Bookmarks/Tools show the real labels for visual parity but
-// are disabled - nothing backs them yet. ETP/FTP server items are
-// deliberately left out of Tools.
+// strings. View/Bookmarks show the real labels for visual parity but are
+// disabled - nothing backs them yet. ETP/FTP server items are deliberately
+// left out of Tools.
 HMENU CreateAppMenu() {
     HMENU menuBar = CreateMenu();
 
@@ -463,7 +582,7 @@ HMENU CreateAppMenu() {
     AppendMenuW(toolsMenu, MF_STRING | MF_GRAYED, 0, L"폴더 인덱스...");
     AppendMenuW(toolsMenu, MF_STRING | MF_GRAYED, 0, L"파일 목록...");
     AppendMenuW(toolsMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(toolsMenu, MF_STRING | MF_GRAYED, 0, L"옵션...(&O)");
+    AppendMenuW(toolsMenu, MF_STRING, IDM_TOOLS_OPTIONS, L"옵션...(&O)");
     AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(toolsMenu), L"도구(&T)");
     // ETP/FTP server connect/disconnect/start/stop items intentionally omitted.
 
@@ -479,6 +598,8 @@ HMENU CreateAppMenu() {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
+            g_excludeFolders = LoadExcludeFolders();
+
             g_status = CreateWindowExW(0, L"STATIC", L"NTFS 볼륨 인덱싱 중...",
                                         WS_CHILD | WS_VISIBLE, 8, 8, 600, 20, hwnd,
                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kStatusId)),
@@ -683,6 +804,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                   MF_BYCOMMAND | (g_useRegex ? MF_CHECKED : MF_UNCHECKED));
                     RunSearch();
                     break;
+                case IDM_TOOLS_OPTIONS:
+                    ShowOptionsWindow(hwnd);
+                    break;
                 case IDM_HELP_SYNTAX:
                     MessageBoxW(hwnd,
                         L"report            이름/경로에 포함\n"
@@ -845,6 +969,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         case WM_DESTROY:
             g_running = false;
+            // Snapshot each volume so the next launch can load-and-catch-up
+            // instead of re-enumerating the whole MFT again.
+            for (auto& volume : g_volumes) {
+                volume->SaveToFile(GetIndexFilePath(volume->Drive()));
+            }
             UnregisterHotKey(hwnd, kShowHideHotkeyId);
             Shell_NotifyIconW(NIM_DELETE, &g_trayIcon);
             PostQuitMessage(0);
