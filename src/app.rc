@@ -1,3 +1,19 @@
 #include <winuser.h>
+#include "resource.h"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
+
+// Skipped whenever the search box has focus (see wWinMain's message loop) so
+// normal text editing (Delete, Ctrl+A/C/X as plain text operations) isn't
+// hijacked by these - they only apply to the results list.
+IDR_ACCELERATORS ACCELERATORS
+{
+    VK_RETURN, IDM_FILE_OPEN, VIRTKEY
+    VK_RETURN, IDM_FILE_PROPERTIES, VIRTKEY, ALT
+    VK_DELETE, IDM_FILE_DELETE, VIRTKEY
+    VK_F2, IDM_FILE_RENAME, VIRTKEY
+    VK_F5, IDM_FILE_REFRESH, VIRTKEY
+    "^A", IDM_EDIT_SELECTALL, ASCII
+    "^C", IDM_EDIT_COPY, ASCII
+    "^X", IDM_EDIT_CUT, ASCII
+}

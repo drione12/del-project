@@ -3,6 +3,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <objbase.h>
+#include <oleidl.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <winioctl.h>
@@ -22,6 +23,7 @@
 
 #include "ntfs_index.h"
 #include "privileges.h"
+#include "resource.h"
 #include "settings.h"
 #include "text_match.h"
 #include "usn_watcher.h"
@@ -40,34 +42,14 @@ constexpr int kShowHideHotkeyId = 1;
 const wchar_t* kSingleInstanceMutexName = L"EverythingClone_SingleInstance_ceb2f6a1";
 const wchar_t* kWindowClassName = L"EverythingCloneWindow";
 
-// Menu command IDs. Menu structure/labels are pulled from the real
+// Menu/accelerator command IDs now live in resource.h - the resource
+// compiler (app.rc's new ACCELERATORS table) only understands #define, not
+// this C++ enum they used to be, so both files need the same plain
+// numeric constants. Menu structure/labels are pulled from the real
 // Everything.exe's own strings (File/Edit/Search/View are wired to
 // existing functionality; Bookmarks shows real labels but is disabled -
 // nothing backs it yet. ETP/FTP server items are deliberately omitted from Tools
 // per the user's request.
-enum MenuCommand {
-    IDM_FILE_OPEN = 2001,
-    IDM_FILE_OPENPATH,
-    IDM_FILE_COPYPATH,
-    IDM_FILE_COPYFULLNAME,
-    IDM_FILE_PROPERTIES,
-    IDM_FILE_DELETE,
-    IDM_FILE_REFRESH,
-    IDM_FILE_CLOSE,
-    IDM_EDIT_COPY,
-    IDM_SEARCH_MATCHCASE,
-    IDM_SEARCH_MATCHWHOLEWORD,
-    IDM_SEARCH_MATCHPATH,
-    IDM_SEARCH_REGEX,
-    IDM_VIEW_WINSIZE_SMALL,
-    IDM_VIEW_WINSIZE_MEDIUM,
-    IDM_VIEW_WINSIZE_LARGE,
-    IDM_VIEW_WINSIZE_MAXIMIZE,
-    IDM_VIEW_FONTCOLOR,
-    IDM_TOOLS_OPTIONS,
-    IDM_TRAY_SHOW,
-    IDM_TRAY_EXIT,
-};
 
 std::vector<std::unique_ptr<NtfsIndex>> g_volumes;
 std::vector<SearchResult> g_results;
@@ -417,11 +399,15 @@ void CopyTextToClipboard(HWND hwnd, const std::wstring& text) {
     CloseClipboard();
 }
 
-// Copies the file(s) themselves (not just path text) to the clipboard as a
-// CF_HDROP, so they can be pasted into Explorer like a real Ctrl+C would -
-// DROPFILES supports any number of items, back to back, each individually
-// null-terminated, with one extra null terminating the whole list.
-void ActionCopyAsFileObject(HWND hwnd, const std::vector<std::wstring>& paths) {
+// Copies (or, with cut=true, marks-for-move) the file(s) themselves (not
+// just path text) to the clipboard as a CF_HDROP, so they can be pasted
+// into Explorer like a real Ctrl+C/Ctrl+X would - DROPFILES supports any
+// number of items, back to back, each individually null-terminated, with
+// one extra null terminating the whole list. "Preferred DropEffect" is a
+// Windows-Explorer-specific registered clipboard format (not part of the
+// CF_HDROP standard itself) that Explorer checks on paste to decide move
+// vs. copy, and whether to dim the source icons in the meantime.
+void ActionCopyAsFileObject(HWND hwnd, const std::vector<std::wstring>& paths, bool cut = false) {
     if (paths.empty()) return;
     if (!OpenClipboard(hwnd)) return;
     EmptyClipboard();
@@ -444,6 +430,18 @@ void ActionCopyAsFileObject(HWND hwnd, const std::vector<std::wstring>& paths) {
         GlobalUnlock(mem);
         SetClipboardData(CF_HDROP, mem);
     }
+
+    if (cut) {
+        UINT cfDropEffect = RegisterClipboardFormatW(L"Preferred DropEffect");
+        HGLOBAL effectMem = GlobalAlloc(GHND, sizeof(DWORD));
+        if (effectMem) {
+            auto* effect = static_cast<DWORD*>(GlobalLock(effectMem));
+            *effect = DROPEFFECT_MOVE;
+            GlobalUnlock(effectMem);
+            SetClipboardData(cfDropEffect, effectMem);
+        }
+    }
+
     CloseClipboard();
 }
 
@@ -714,7 +712,8 @@ HMENU CreateAppMenu() {
 
     HMENU editMenu = CreatePopupMenu();
     AppendMenuW(editMenu, MF_STRING, IDM_EDIT_COPY, L"복사(&C)");
-    AppendMenuW(editMenu, MF_STRING | MF_GRAYED, 0, L"모두 선택(&A)");
+    AppendMenuW(editMenu, MF_STRING, IDM_EDIT_CUT, L"잘라내기(&T)");
+    AppendMenuW(editMenu, MF_STRING, IDM_EDIT_SELECTALL, L"모두 선택(&A)");
     AppendMenuW(editMenu, MF_STRING | MF_GRAYED, 0, L"선택 반전(&I)");
     AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(editMenu), L"편집(&E)");
 
@@ -769,7 +768,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             g_resultsView = CreateWindowExW(
                 0, WC_LISTVIEWW, L"",
-                WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA | LVS_EDITLABELS,
                 8, 64, 600, 400, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kResultsId)), nullptr, nullptr);
             ListView_SetExtendedListViewStyle(g_resultsView, LVS_EX_FULLROWSELECT);
@@ -945,6 +944,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     ActionCopyAsFileObject(hwnd, paths);
                     break;
                 }
+                case IDM_EDIT_CUT: {
+                    std::vector<std::wstring> paths;
+                    GetSelectedResults(paths);
+                    ActionCopyAsFileObject(hwnd, paths, /*cut=*/true);
+                    break;
+                }
+                case IDM_EDIT_SELECTALL:
+                    ListView_SetItemState(g_resultsView, -1, LVIS_SELECTED, LVIS_SELECTED);
+                    break;
+                case IDM_FILE_RENAME: {
+                    int selected = ListView_GetNextItem(g_resultsView, -1, LVNI_SELECTED);
+                    if (selected >= 0) {
+                        SetFocus(g_resultsView);
+                        ListView_EditLabel(g_resultsView, selected);
+                    }
+                    break;
+                }
                 case IDM_SEARCH_MATCHCASE:
                     g_matchCase = !g_matchCase;
                     CheckMenuItem(GetMenu(hwnd), IDM_SEARCH_MATCHCASE,
@@ -1068,6 +1084,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SortResults();
                 UpdateSortHeaderIndicator();
                 InvalidateRect(g_resultsView, nullptr, FALSE);
+            } else if (hdr->code == LVN_ENDLABELEDIT) {
+                // F2 rename (ListView_EditLabel), via its built-in inline
+                // edit box - LVS_OWNERDATA means the view never caches its
+                // own copy of the text, so this only needs to touch
+                // g_results; a later LVN_GETDISPINFOW naturally re-reads
+                // whatever's there.
+                auto* di = reinterpret_cast<NMLVDISPINFOW*>(lParam);
+                if (di->item.pszText != nullptr && di->item.iItem >= 0 &&
+                    static_cast<size_t>(di->item.iItem) < g_results.size()) {
+                    std::wstring newName = di->item.pszText;
+                    if (!newName.empty()) {
+                        std::wstring& oldPath = g_results[di->item.iItem].path;
+                        std::wstring name, dir;
+                        SplitNameAndDir(oldPath, name, dir);
+                        std::wstring newPath = dir.empty() ? newName : (dir + L"\\" + newName);
+                        if (MoveFileW(oldPath.c_str(), newPath.c_str())) {
+                            oldPath = newPath;
+                            InvalidateRect(g_resultsView, nullptr, FALSE);
+                        } else {
+                            MessageBoxW(hwnd, L"이름을 바꾸지 못했습니다.", L"이름 바꾸기 실패",
+                                        MB_OK | MB_ICONERROR);
+                        }
+                    }
+                }
+                return 0;
             }
             return 0;
         }
@@ -1180,10 +1221,19 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 
+    HACCEL accel = LoadAcceleratorsW(hInstance, MAKEINTRESOURCEW(IDR_ACCELERATORS));
+
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        // Skipping TranslateAccelerator whenever the search box has focus
+        // is deliberate: without it, e.g. Delete/Ctrl+A/Ctrl+C while typing
+        // a query would hit the results-list accelerators below instead of
+        // normal text editing in the box.
+        bool searchBoxFocused = (GetFocus() == g_searchBox);
+        if (searchBoxFocused || !TranslateAccelerator(hwnd, accel, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
     CoUninitialize();
     return static_cast<int>(msg.wParam);
