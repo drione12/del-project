@@ -22,6 +22,7 @@ def main() -> int:
     window.show()
     app.processEvents()
     print("OK: MainWindow constructed and all pages built without error.")
+    window.shutdown()
     window.close()
     return 0
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 
+from ui.pages.dashboard_page import DashboardPage
 from ui.pages.placeholder_page import PlaceholderPage
 from ui.sidebar import Sidebar
 from ui.title_bar import TitleBar
@@ -79,8 +80,14 @@ class MainWindow(QMainWindow):
 
     def _build_pages(self) -> None:
         for page_id, icon_name, tooltip in _PAGES:
-            widget = PlaceholderPage(icon_name, tooltip, _PLACEHOLDER_SUBTITLE)
+            widget = self._make_page(page_id, icon_name, tooltip)
             self._page_indices[page_id] = self._stack.addWidget(widget)
+
+    @staticmethod
+    def _make_page(page_id: str, icon_name: str, tooltip: str) -> QWidget:
+        if page_id == "dashboard":
+            return DashboardPage()
+        return PlaceholderPage(icon_name, tooltip, _PLACEHOLDER_SUBTITLE)
 
     def go_to_page(self, page_id: str) -> None:
         index = self._page_indices.get(page_id)
@@ -109,3 +116,18 @@ class MainWindow(QMainWindow):
         self.hide()
         if self._tray.isSystemTrayAvailable():
             self._tray.showMessage("Memory Master", "백그라운드에서 계속 실행 중입니다.")
+
+    def shutdown(self) -> None:
+        """Stops any background workers a page may have started (currently
+        just the dashboard's metrics poller). Called explicitly by the
+        offscreen smoke check, which never enters a real exec_() event
+        loop - the normally-running app instead stops workers via
+        DashboardPage's own QApplication.aboutToQuit connection, made when
+        the tray's exit action calls QApplication.quit() from inside
+        exec_().
+        """
+        for i in range(self._stack.count()):
+            page = self._stack.widget(i)
+            stop = getattr(page, "stop", None)
+            if callable(stop):
+                stop()
