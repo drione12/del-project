@@ -30,7 +30,12 @@ constexpr int kSearchBoxId = 101;
 constexpr int kStatusId = 102;
 constexpr int kResultsId = 103;
 constexpr UINT kMsgIndexReady = WM_APP + 1;
+constexpr UINT kMsgTrayIcon = WM_APP + 2;
 constexpr size_t kMaxResults = 2000;
+constexpr UINT kTrayIconId = 1;
+constexpr int kShowHideHotkeyId = 1;
+const wchar_t* kSingleInstanceMutexName = L"EverythingClone_SingleInstance_ceb2f6a1";
+const wchar_t* kWindowClassName = L"EverythingCloneWindow";
 
 // Menu command IDs. Menu structure/labels are pulled from the real
 // Everything.exe's own strings (File/Edit/Search/Help are wired to existing
@@ -53,6 +58,8 @@ enum MenuCommand {
     IDM_SEARCH_REGEX,
     IDM_HELP_SYNTAX,
     IDM_HELP_ABOUT,
+    IDM_TRAY_SHOW,
+    IDM_TRAY_EXIT,
 };
 
 std::vector<std::unique_ptr<NtfsIndex>> g_volumes;
@@ -72,6 +79,21 @@ bool g_matchCase = false;
 bool g_matchWholeWord = false;
 bool g_matchPath = false;
 bool g_useRegex = false;
+
+NOTIFYICONDATAW g_trayIcon{};
+
+// Shows+focuses or hides the main window, shared by tray icon
+// click/double-click and the global show/hide hotkey.
+void ToggleMainWindow(HWND hwnd) {
+    if (IsWindowVisible(hwnd)) {
+        ShowWindow(hwnd, SW_HIDE);
+    } else {
+        ShowWindow(hwnd, SW_SHOW);
+        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+        SetFocus(g_searchBox);
+    }
+}
 
 void SplitNameAndDir(const std::wstring& fullPath, std::wstring& name, std::wstring& dir) {
     size_t pos = fullPath.find_last_of(L'\\');
@@ -518,10 +540,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             col.pszText = const_cast<LPWSTR>(L"속성");
             ListView_InsertColumn(g_resultsView, 7, &col);
 
+            g_trayIcon.cbSize = sizeof(g_trayIcon);
+            g_trayIcon.hWnd = hwnd;
+            g_trayIcon.uID = kTrayIconId;
+            g_trayIcon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+            g_trayIcon.uCallbackMessage = kMsgTrayIcon;
+            g_trayIcon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+            wcscpy_s(g_trayIcon.szTip, L"EverythingClone");
+            Shell_NotifyIconW(NIM_ADD, &g_trayIcon);
+
+            RegisterHotKey(hwnd, kShowHideHotkeyId, MOD_CONTROL | MOD_ALT, VK_SPACE);
+
             std::thread(IndexingThread, hwnd).detach();
             return 0;
         }
         case WM_SIZE: {
+            if (wParam == SIZE_MINIMIZED) {
+                // Minimize-to-tray instead of leaving a taskbar entry - the
+                // window is still there (SW_HIDE, not destroyed), the tray
+                // icon's click handler brings it back.
+                ShowWindow(hwnd, SW_HIDE);
+                return 0;
+            }
             int w = LOWORD(lParam), h = HIWORD(lParam);
             MoveWindow(g_status, 8, 8, w - 16, 20, TRUE);
             MoveWindow(g_searchBox, 8, 32, w - 16, 26, TRUE);
@@ -548,6 +588,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 swprintf_s(status, L"%zu개 인덱싱 완료 - 검색어를 입력하세요", total);
             }
             SetWindowTextW(g_status, status);
+            return 0;
+        }
+        case kMsgTrayIcon: {
+            switch (lParam) {
+                case WM_LBUTTONUP:
+                case WM_LBUTTONDBLCLK:
+                    ToggleMainWindow(hwnd);
+                    break;
+                case WM_RBUTTONUP: {
+                    POINT pt;
+                    GetCursorPos(&pt);
+                    HMENU menu = CreatePopupMenu();
+                    AppendMenuW(menu, MF_STRING, IDM_TRAY_SHOW, L"열기");
+                    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"종료");
+                    SetForegroundWindow(hwnd);
+                    TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+                    PostMessage(hwnd, WM_NULL, 0, 0);
+                    DestroyMenu(menu);
+                    break;
+                }
+            }
+            return 0;
+        }
+        case WM_HOTKEY: {
+            if (wParam == kShowHideHotkeyId) {
+                ToggleMainWindow(hwnd);
+            }
             return 0;
         }
         case WM_COMMAND: {
@@ -639,6 +707,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         L"voidtools Everything의 NTFS MFT/USN 기반 실시간 파일 검색 방식을 "
                         L"재구현한 클론입니다.",
                         L"Everything 정보", MB_OK | MB_ICONINFORMATION);
+                    break;
+                case IDM_TRAY_SHOW:
+                    ShowWindow(hwnd, SW_SHOW);
+                    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+                    SetForegroundWindow(hwnd);
+                    SetFocus(g_searchBox);
+                    break;
+                case IDM_TRAY_EXIT:
+                    PostMessage(hwnd, WM_CLOSE, 0, 0);
                     break;
             }
             return 0;
@@ -768,6 +845,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         case WM_DESTROY:
             g_running = false;
+            UnregisterHotKey(hwnd, kShowHideHotkeyId);
+            Shell_NotifyIconW(NIM_DELETE, &g_trayIcon);
             PostQuitMessage(0);
             return 0;
     }
@@ -777,20 +856,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }  // namespace
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
+    // Single instance: a second launch just wakes up the first one instead
+    // of starting a second full volume index. The mutex handle is
+    // intentionally never closed - it only needs to outlive this process,
+    // and Windows cleans it up on exit.
+    HANDLE singleInstanceMutex = CreateMutexW(nullptr, TRUE, kSingleInstanceMutexName);
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND existing = FindWindowW(kWindowClassName, nullptr);
+        if (existing) {
+            ShowWindow(existing, SW_SHOW);
+            if (IsIconic(existing)) ShowWindow(existing, SW_RESTORE);
+            SetForegroundWindow(existing);
+        }
+        return 0;
+    }
+
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&icc);
 
-    const wchar_t* className = L"EverythingCloneWindow";
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = className;
+    wc.lpszClassName = kWindowClassName;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, className, L"EverythingClone", WS_OVERLAPPEDWINDOW,
+    HWND hwnd = CreateWindowExW(0, kWindowClassName, L"EverythingClone", WS_OVERLAPPEDWINDOW,
                                  CW_USEDEFAULT, CW_USEDEFAULT, 700, 560, nullptr, CreateAppMenu(),
                                  hInstance, nullptr);
     if (!hwnd) return 1;
