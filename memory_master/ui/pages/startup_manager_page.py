@@ -8,7 +8,7 @@ moment on a machine with many tasks.
 """
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -49,6 +49,7 @@ class StartupManagerPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._entries: List[StartupEntry] = []
+        self._worker: Optional[_ScanWorker] = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -147,3 +148,18 @@ class StartupManagerPage(QWidget):
         if any_failed:
             QMessageBox.warning(self, "제거 실패", "일부 항목을 제거하지 못했습니다.")
         self._refresh()
+
+    def stop(self) -> None:
+        """Waits for any in-flight scan to finish before the app can
+        safely close. Unlike the rest of this app's workers (which only
+        start in response to a user action), this page kicks a QThread
+        off immediately on construction - and unlike a quick local test,
+        it can genuinely take several real seconds on actual Windows
+        (schtasks itself, plus a psutil scan per non-N/A entry). Destroying
+        a QThread object while its run() is still executing is undefined
+        behavior in Qt, not just a missed cleanup - the timeout here is
+        set past _query_scheduled_tasks()'s own 30s subprocess timeout so
+        a legitimately slow-but-finishing scan isn't cut short.
+        """
+        if self._worker is not None:
+            self._worker.wait(35000)
