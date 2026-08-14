@@ -121,6 +121,34 @@ std::wstring FormatFileTime(uint64_t fileTimeValue) {
     return buf;
 }
 
+// Compact attrib-style letter string (e.g. "RHA"), using the same
+// letter<->FILE_ATTRIBUTE_* mapping as query.cpp's attrib: filter so the
+// column and the search syntax stay consistent.
+std::wstring FormatAttributes(DWORD attributes) {
+    struct { DWORD bit; wchar_t letter; } kFlags[] = {
+        {FILE_ATTRIBUTE_READONLY, L'R'},  {FILE_ATTRIBUTE_HIDDEN, L'H'},
+        {FILE_ATTRIBUTE_SYSTEM, L'S'},    {FILE_ATTRIBUTE_DIRECTORY, L'D'},
+        {FILE_ATTRIBUTE_ARCHIVE, L'A'},   {FILE_ATTRIBUTE_COMPRESSED, L'C'},
+        {FILE_ATTRIBUTE_ENCRYPTED, L'E'}, {FILE_ATTRIBUTE_TEMPORARY, L'T'},
+        {FILE_ATTRIBUTE_OFFLINE, L'O'},   {FILE_ATTRIBUTE_REPARSE_POINT, L'L'},
+    };
+    std::wstring out;
+    for (auto& f : kFlags) {
+        if (attributes & f.bit) out += f.letter;
+    }
+    return out;
+}
+
+// Extension without the leading dot, for display - empty for directories,
+// extension-less files, and dotfiles (a leading dot with nothing before it
+// is a name, not an extension, matching Explorer's convention).
+std::wstring GetExtensionDisplay(const SearchResult& r, const std::wstring& name) {
+    if (r.attributes & FILE_ATTRIBUTE_DIRECTORY) return L"";
+    size_t dot = name.find_last_of(L'.');
+    if (dot == std::wstring::npos || dot == 0) return L"";
+    return name.substr(dot + 1);
+}
+
 // Looks up the shared shell icon index for a result, caching by extension
 // (or a sentinel for folders/no-extension) so repeated files of the same
 // type don't each cost a SHGetFileInfoW call.
@@ -163,6 +191,24 @@ void SortResults() {
                        case 3:
                            return g_sortAscending ? a.modifiedTime < b.modifiedTime
                                                    : a.modifiedTime > b.modifiedTime;
+                       case 4:
+                           return g_sortAscending ? a.createdTime < b.createdTime
+                                                   : a.createdTime > b.createdTime;
+                       case 5:
+                           return g_sortAscending ? a.accessedTime < b.accessedTime
+                                                   : a.accessedTime > b.accessedTime;
+                       case 6: {
+                           std::wstring na, nb, dirA, dirB;
+                           SplitNameAndDir(a.path, na, dirA);
+                           SplitNameAndDir(b.path, nb, dirB);
+                           std::wstring extA = GetExtensionDisplay(a, na);
+                           std::wstring extB = GetExtensionDisplay(b, nb);
+                           int cmp = _wcsicmp(extA.c_str(), extB.c_str());
+                           return g_sortAscending ? cmp < 0 : cmp > 0;
+                       }
+                       case 7:
+                           return g_sortAscending ? a.attributes < b.attributes
+                                                   : a.attributes > b.attributes;
                        case 0: {
                            std::wstring na, nb, dirA, dirB;
                            SplitNameAndDir(a.path, na, dirA);
@@ -456,6 +502,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             col.pszText = const_cast<LPWSTR>(L"수정한 날짜");
             ListView_InsertColumn(g_resultsView, 3, &col);
 
+            col.cx = 130;
+            col.pszText = const_cast<LPWSTR>(L"생성한 날짜");
+            ListView_InsertColumn(g_resultsView, 4, &col);
+
+            col.cx = 130;
+            col.pszText = const_cast<LPWSTR>(L"액세스한 날짜");
+            ListView_InsertColumn(g_resultsView, 5, &col);
+
+            col.cx = 70;
+            col.pszText = const_cast<LPWSTR>(L"확장자");
+            ListView_InsertColumn(g_resultsView, 6, &col);
+
+            col.cx = 70;
+            col.pszText = const_cast<LPWSTR>(L"속성");
+            ListView_InsertColumn(g_resultsView, 7, &col);
+
             std::thread(IndexingThread, hwnd).detach();
             return 0;
         }
@@ -465,10 +527,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             MoveWindow(g_searchBox, 8, 32, w - 16, 26, TRUE);
             MoveWindow(g_resultsView, 8, 64, w - 16, h - 72, TRUE);
             int totalW = w - 16 - 20;  // minus scrollbar allowance
-            ListView_SetColumnWidth(g_resultsView, 0, totalW * 27 / 100);
-            ListView_SetColumnWidth(g_resultsView, 1, totalW * 38 / 100);
-            ListView_SetColumnWidth(g_resultsView, 2, totalW * 12 / 100);
-            ListView_SetColumnWidth(g_resultsView, 3, totalW * 23 / 100);
+            ListView_SetColumnWidth(g_resultsView, 0, totalW * 16 / 100);
+            ListView_SetColumnWidth(g_resultsView, 1, totalW * 24 / 100);
+            ListView_SetColumnWidth(g_resultsView, 2, totalW * 8 / 100);
+            ListView_SetColumnWidth(g_resultsView, 3, totalW * 13 / 100);
+            ListView_SetColumnWidth(g_resultsView, 4, totalW * 13 / 100);
+            ListView_SetColumnWidth(g_resultsView, 5, totalW * 13 / 100);
+            ListView_SetColumnWidth(g_resultsView, 6, totalW * 6 / 100);
+            ListView_SetColumnWidth(g_resultsView, 7, totalW * 7 / 100);
             return 0;
         }
         case kMsgIndexReady: {
@@ -604,6 +670,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             break;
                         case 3:
                             text = FormatFileTime(r.modifiedTime);
+                            break;
+                        case 4:
+                            text = FormatFileTime(r.createdTime);
+                            break;
+                        case 5:
+                            text = FormatFileTime(r.accessedTime);
+                            break;
+                        case 6: {
+                            std::wstring name, dir;
+                            SplitNameAndDir(r.path, name, dir);
+                            text = GetExtensionDisplay(r, name);
+                            break;
+                        }
+                        case 7:
+                            text = FormatAttributes(r.attributes);
                             break;
                     }
                     wcsncpy_s(di->item.pszText, di->item.cchTextMax, text.c_str(), _TRUNCATE);

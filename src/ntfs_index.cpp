@@ -218,7 +218,8 @@ std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText,
         }
         if (!matched) continue;
 
-        results.push_back({path, entry.size, entry.modifiedTime, entry.attributes});
+        results.push_back(
+            {path, entry.size, entry.createdTime, entry.modifiedTime, entry.accessedTime, entry.attributes});
         if (results.size() >= maxResults) break;
     }
     return results;

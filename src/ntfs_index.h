@@ -15,7 +15,9 @@
 struct SearchResult {
     std::wstring path;
     uint64_t size = 0;
-    uint64_t modifiedTime = 0;  // FILETIME as a single 100ns-tick uint64
+    uint64_t createdTime = 0;   // FILETIME as a single 100ns-tick uint64
+    uint64_t modifiedTime = 0;
+    uint64_t accessedTime = 0;
     DWORD attributes = 0;
 };
 
