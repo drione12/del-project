@@ -1,0 +1,128 @@
+/* Memory Master - dark theme. Colors match the palette validated in the
+   plan doc (dataviz-skill checked): #2f7de0 blue / #059669 green /
+   #ea580c orange / #0d9488 teal, plus the dark-navy card/background
+   scheme from the mockup. */
+
+QWidget#RootBackground, QMainWindow {
+    background-color: #121621;
+    color: #e2e8f0;
+}
+
+QWidget#TitleBar {
+    background-color: #121621;
+    border-bottom: 1px solid #1f2532;
+}
+
+QWidget#Sidebar {
+    background-color: #161b26;
+    border-right: 1px solid #1f2532;
+}
+
+QLabel {
+    color: #e2e8f0;
+}
+
+QFrame[role="card"] {
+    background-color: #1a202c;
+    border-radius: 8px;
+}
+
+QToolButton#TitleBarButton {
+    background-color: transparent;
+    border: none;
+    border-radius: 4px;
+}
+QToolButton#TitleBarButton:hover {
+    background-color: #1f2532;
+}
+QToolButton#CloseButton:hover {
+    background-color: #b3261e;
+}
+
+QToolButton#SidebarButton {
+    background-color: transparent;
+    border: none;
+    border-radius: 10px;
+}
+QToolButton#SidebarButton:hover {
+    background-color: #1f2532;
+}
+QToolButton#SidebarButton:checked {
+    background-color: #1e3a5f;
+}
+
+QPushButton {
+    background-color: #2a3142;
+    color: #e2e8f0;
+    border: none;
+    border-radius: 5px;
+    padding: 8px 14px;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background-color: #34405a;
+}
+QPushButton:disabled {
+    color: #5a6072;
+}
+
+QPushButton[role="primary"] {
+    background-color: #2f7de0;
+}
+QPushButton[role="primary"]:hover {
+    background-color: #4a90ea;
+}
+
+QPushButton[role="danger"] {
+    background-color: #ea580c;
+}
+QPushButton[role="danger"]:hover {
+    background-color: #ff6a1f;
+}
+
+QListWidget, QTableWidget, QTextEdit, QLineEdit, QPlainTextEdit {
+    background-color: #0f131d;
+    color: #e2e8f0;
+    border: 1px solid #2a3142;
+    border-radius: 4px;
+}
+
+QTableWidget {
+    gridline-color: #2a3142;
+}
+
+QHeaderView::section {
+    background-color: #1a202c;
+    color: #8c92a4;
+    border: none;
+    padding: 4px;
+}
+
+QScrollBar:vertical {
+    background: #121621;
+    width: 10px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #2a3142;
+    border-radius: 5px;
+    min-height: 24px;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QCheckBox, QRadioButton {
+    color: #e2e8f0;
+}
+
+QProgressBar {
+    background-color: #0f131d;
+    border-radius: 6px;
+    text-align: center;
+    color: transparent;
+}
+QProgressBar::chunk {
+    background-color: #2f7de0;
+    border-radius: 6px;
+}

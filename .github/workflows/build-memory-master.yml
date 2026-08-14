@@ -23,3 +23,8 @@ jobs:
 
       - name: Run unit tests
         run: pytest memory_master/tests -v
+
+      - name: PyQt5 import/construct smoke check
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python memory_master/scripts/smoke_check.py
