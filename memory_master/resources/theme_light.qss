@@ -1,0 +1,138 @@
+/* Memory Master - light theme. Title bar and sidebar deliberately stay
+   dark (same colors as the dark theme) rather than getting light
+   variants: the sidebar's SVG icons are hand-authored with a single
+   light stroke color (#e2e8f0, see resources/icons/*.svg), and QSS has
+   no CSS currentColor-style recoloring - a real light sidebar would need
+   a second full set of icon files, a bigger, separable effort. Content
+   (cards, text, tables, lists, buttons) gets a real light palette. */
+
+QWidget#RootBackground, QMainWindow {
+    background-color: #f5f6f8;
+    color: #1a202c;
+}
+
+QWidget#TitleBar {
+    background-color: #121621;
+    border-bottom: 1px solid #1f2532;
+}
+
+QWidget#TitleBar QLabel {
+    color: #e2e8f0;
+}
+
+QWidget#Sidebar {
+    background-color: #161b26;
+    border-right: 1px solid #1f2532;
+}
+
+QLabel {
+    color: #1a202c;
+}
+
+QFrame[role="card"] {
+    background-color: #ffffff;
+    border: 1px solid #e2e6ec;
+    border-radius: 8px;
+}
+
+QToolButton#TitleBarButton {
+    background-color: transparent;
+    border: none;
+    border-radius: 4px;
+}
+QToolButton#TitleBarButton:hover {
+    background-color: #1f2532;
+}
+QToolButton#CloseButton:hover {
+    background-color: #b3261e;
+}
+
+QToolButton#SidebarButton {
+    background-color: transparent;
+    border: none;
+    border-radius: 10px;
+}
+QToolButton#SidebarButton:hover {
+    background-color: #1f2532;
+}
+QToolButton#SidebarButton:checked {
+    background-color: #2f5d8f;
+}
+
+QPushButton {
+    background-color: #e9ecf2;
+    color: #1a202c;
+    border: none;
+    border-radius: 5px;
+    padding: 8px 14px;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background-color: #dde1e8;
+}
+QPushButton:disabled {
+    color: #a0a6b3;
+}
+
+QPushButton[role="primary"] {
+    background-color: #2f7de0;
+    color: #ffffff;
+}
+QPushButton[role="primary"]:hover {
+    background-color: #4a90ea;
+}
+
+QPushButton[role="danger"] {
+    background-color: #ea580c;
+    color: #ffffff;
+}
+QPushButton[role="danger"]:hover {
+    background-color: #ff6a1f;
+}
+
+QListWidget, QTableWidget, QTextEdit, QLineEdit, QPlainTextEdit {
+    background-color: #ffffff;
+    color: #1a202c;
+    border: 1px solid #dde1e8;
+    border-radius: 4px;
+}
+
+QTableWidget {
+    gridline-color: #e2e6ec;
+}
+
+QHeaderView::section {
+    background-color: #f0f1f5;
+    color: #5a6072;
+    border: none;
+    padding: 4px;
+}
+
+QScrollBar:vertical {
+    background: #f5f6f8;
+    width: 10px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #d3d8e0;
+    border-radius: 5px;
+    min-height: 24px;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QCheckBox, QRadioButton {
+    color: #1a202c;
+}
+
+QProgressBar {
+    background-color: #e9ecf2;
+    border-radius: 6px;
+    text-align: center;
+    color: transparent;
+}
+QProgressBar::chunk {
+    background-color: #2f7de0;
+    border-radius: 6px;
+}
