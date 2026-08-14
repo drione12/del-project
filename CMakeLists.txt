@@ -33,3 +33,8 @@ target_link_options(EverythingClone PRIVATE "/MANIFEST:NO")
 # narrow (char*) charset while every API call in this project uses the
 # explicit wide (...W) entry points - keep them consistent.
 target_compile_definitions(EverythingClone PRIVATE UNICODE _UNICODE)
+
+# Source files are UTF-8. Without /utf-8, MSVC decodes them using the
+# active ANSI code page instead, so every non-ASCII (Korean) string
+# literal comes out mojibake despite compiling with no errors.
+target_compile_options(EverythingClone PRIVATE /utf-8)
