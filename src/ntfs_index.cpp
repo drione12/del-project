@@ -258,10 +258,13 @@ void NtfsIndex::ApplyUsnRecord(const USN_RECORD* record, HANDLE hVolume) {
 std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText, size_t maxResults,
                                              const std::vector<std::wstring>& excludeFolders) const {
     std::vector<SearchResult> results;
-    if (queryText.empty()) return results;
 
+    // An empty query (nothing typed, or only inline toggles like "case:"
+    // with no actual search text) has no groups to match against - real
+    // Everything's own behavior for that case is "show everything" rather
+    // than nothing, so that's what an empty query means here too.
     Query query = ParseQuery(queryText);
-    if (query.groups.empty()) return results;
+    bool matchAll = query.groups.empty();
 
     bool needDupe = false, needSizeDupe = false, needNamePartDupe = false, needAttribDupe = false;
     bool needDaDupe = false, needDcDupe = false, needDmDupe = false;
@@ -332,7 +335,10 @@ std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText, size_
     for (const auto& [frn, entry] : records_) {
         std::wstring path;
         bool matched;
-        if (query.options.matchPath) {
+        if (matchAll) {
+            matched = true;
+            path = ResolvePathLocked(frn);
+        } else if (query.options.matchPath) {
             path = ResolvePathLocked(frn);
             matched = MatchesQuery(query, entry.name, path, entry.attributes, entry.size,
                                     entry.createdTime, entry.modifiedTime, entry.accessedTime,

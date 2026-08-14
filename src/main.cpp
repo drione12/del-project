@@ -41,7 +41,7 @@ const wchar_t* kSingleInstanceMutexName = L"EverythingClone_SingleInstance_ceb2f
 const wchar_t* kWindowClassName = L"EverythingCloneWindow";
 
 // Menu command IDs. Menu structure/labels are pulled from the real
-// Everything.exe's own strings (File/Edit/Search/View/Help are wired to
+// Everything.exe's own strings (File/Edit/Search/View are wired to
 // existing functionality; Bookmarks shows real labels but is disabled -
 // nothing backs it yet. ETP/FTP server items are deliberately omitted from Tools
 // per the user's request.
@@ -65,8 +65,6 @@ enum MenuCommand {
     IDM_VIEW_WINSIZE_MAXIMIZE,
     IDM_VIEW_FONTCOLOR,
     IDM_TOOLS_OPTIONS,
-    IDM_HELP_SYNTAX,
-    IDM_HELP_ABOUT,
     IDM_TRAY_SHOW,
     IDM_TRAY_EXIT,
 };
@@ -182,32 +180,50 @@ std::wstring GetExtensionDisplay(const SearchResult& r, const std::wstring& name
     return name.substr(dot + 1);
 }
 
-// Looks up the shared shell icon index for a result, caching by extension
-// (or a sentinel for folders/no-extension) so repeated files of the same
-// type don't each cost a SHGetFileInfoW call.
+// Extensions whose icon isn't determined by the extension alone - each
+// individual .exe/.dll/etc. can embed its own distinct icon resource, unlike
+// e.g. .txt where every file shares one icon for the type.
+bool HasPerFileIcon(const std::wstring& ext) {
+    static const std::unordered_map<std::wstring, bool> kPerFile = {
+        {L".exe", true}, {L".dll", true}, {L".ico", true},
+        {L".lnk", true}, {L".scr", true}, {L".cpl", true}, {L".url", true},
+    };
+    return kPerFile.count(ext) != 0;
+}
+
+// Looks up the shared shell icon index for a result. Folders and most file
+// types are cached by extension (or a sentinel) via a fast
+// SHGFI_USEFILEATTRIBUTES lookup that never touches the actual file, since
+// every file of that type shares one icon. Types with a real per-file icon
+// (see HasPerFileIcon) instead look up - and cache by - the actual path, the
+// only way to get the icon embedded in that specific file rather than a
+// generic placeholder.
 int GetIconIndex(const SearchResult& r) {
     bool isDir = (r.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
-    std::wstring key;
-    std::wstring probe;
-    DWORD attrs;
-    if (isDir) {
-        key = L"\\dir";
-        probe = L"folder";
-        attrs = FILE_ATTRIBUTE_DIRECTORY;
-    } else {
+    std::wstring ext;
+    if (!isDir) {
         std::wstring name, dir;
         SplitNameAndDir(r.path, name, dir);
         size_t dot = name.find_last_of(L'.');
-        std::wstring ext = (dot == std::wstring::npos) ? std::wstring() : ToLower(name.substr(dot));
-        key = ext.empty() ? L"\\noext" : ext;
-        probe = ext.empty() ? L"file" : ext;
-        attrs = FILE_ATTRIBUTE_NORMAL;
+        ext = (dot == std::wstring::npos) ? std::wstring() : ToLower(name.substr(dot));
     }
 
+    if (!isDir && HasPerFileIcon(ext)) {
+        auto it = g_iconCache.find(r.path);
+        if (it != g_iconCache.end()) return it->second;
+        SHFILEINFOW sfi{};
+        SHGetFileInfoW(r.path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+        g_iconCache[r.path] = sfi.iIcon;
+        return sfi.iIcon;
+    }
+
+    std::wstring key = isDir ? L"\\dir" : (ext.empty() ? L"\\noext" : ext);
     auto it = g_iconCache.find(key);
     if (it != g_iconCache.end()) return it->second;
 
+    std::wstring probe = isDir ? L"folder" : (ext.empty() ? L"file" : ext);
+    DWORD attrs = isDir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
     SHFILEINFOW sfi{};
     SHGetFileInfoW(probe.c_str(), attrs, &sfi, sizeof(sfi),
                    SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES);
@@ -697,12 +713,6 @@ HMENU CreateAppMenu() {
     AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(toolsMenu), L"도구(&T)");
     // ETP/FTP server connect/disconnect/start/stop items intentionally omitted.
 
-    HMENU helpMenu = CreatePopupMenu();
-    AppendMenuW(helpMenu, MF_STRING, IDM_HELP_SYNTAX, L"검색 문법 도움말");
-    AppendMenuW(helpMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(helpMenu, MF_STRING, IDM_HELP_ABOUT, L"Everything 정보(&A)");
-    AppendMenuW(menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(helpMenu), L"도움말(&H)");
-
     return menuBar;
 }
 
@@ -812,16 +822,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         case kMsgIndexReady: {
-            size_t total = TotalCount();
-            wchar_t status[256];
-            if (total == 0) {
-                swprintf_s(status, L"인덱싱 실패 - 이 프로그램을 관리자 권한으로 다시 실행하세요");
+            if (TotalCount() == 0) {
+                SetWindowTextW(g_status, L"인덱싱 실패 - 이 프로그램을 관리자 권한으로 다시 실행하세요");
             } else {
                 EnableWindow(g_searchBox, TRUE);
                 SetFocus(g_searchBox);
-                swprintf_s(status, L"%zu개 인덱싱 완료 - 검색어를 입력하세요", total);
+                // Populate the list immediately (real Everything shows every
+                // indexed item by default, not a blank screen until you type)
+                // - RunSearch sets its own "N / M개 표시" status text.
+                RunSearch();
             }
-            SetWindowTextW(g_status, status);
             return 0;
         }
         case kMsgTrayIcon: {
@@ -934,31 +944,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     break;
                 case IDM_TOOLS_OPTIONS:
                     ShowOptionsWindow(hwnd);
-                    break;
-                case IDM_HELP_SYNTAX:
-                    MessageBoxW(hwnd,
-                        L"report            이름/경로에 포함\n"
-                        L"*.jpg             와일드카드\n"
-                        L"\"exact phrase\"    정확한 구문\n"
-                        L"budget | invoice  OR\n"
-                        L"!temp             제외 (NOT)\n"
-                        L"ext:jpg;png       확장자\n"
-                        L"folder: / file:   폴더만 / 파일만\n"
-                        L"attrib:h          속성\n"
-                        L"case: / path: / wholeword:  전역 토글\n"
-                        L"regex:            정규식\n"
-                        L"size:>10mb        크기 필터\n"
-                        L"dm:today          수정일 필터 (dc:/da:도 동일)\n"
-                        L"dupe:             중복 파일명 (sizedupe:/namepartdupe:/attribdupe:/\n"
-                        L"                  dadupe:/dcdupe:/dmdupe:도 동일한 방식)",
-                        L"검색 문법 도움말", MB_OK | MB_ICONINFORMATION);
-                    break;
-                case IDM_HELP_ABOUT:
-                    MessageBoxW(hwnd,
-                        L"EverythingClone\n\n"
-                        L"voidtools Everything의 NTFS MFT/USN 기반 실시간 파일 검색 방식을 "
-                        L"재구현한 클론입니다.",
-                        L"Everything 정보", MB_OK | MB_ICONINFORMATION);
                     break;
                 case IDM_TRAY_SHOW:
                     ShowWindow(hwnd, SW_SHOW);
