@@ -7,10 +7,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from core.startup_programs import (  # noqa: E402
     BootImpact,
-    _extract_exe_path,
     _resolve_impact_size,
     add_startup_program,
     classify_boot_impact,
+    extract_exe_path,
     parse_scheduled_tasks_csv,
     remove_startup_program,
 )
@@ -36,16 +36,16 @@ def test_classify_boot_impact_high_at_threshold():
 
 
 def test_extract_exe_path_quoted_with_args():
-    assert _extract_exe_path('"C:\\Program Files\\App\\app.exe" --flag') == "C:\\Program Files\\App\\app.exe"
+    assert extract_exe_path('"C:\\Program Files\\App\\app.exe" --flag') == "C:\\Program Files\\App\\app.exe"
 
 
 def test_extract_exe_path_unquoted_with_args():
-    assert _extract_exe_path("C:\\App\\app.exe --flag") == "C:\\App\\app.exe"
+    assert extract_exe_path("C:\\App\\app.exe --flag") == "C:\\App\\app.exe"
 
 
 def test_extract_exe_path_empty_returns_none():
-    assert _extract_exe_path("") is None
-    assert _extract_exe_path("   ") is None
+    assert extract_exe_path("") is None
+    assert extract_exe_path("   ") is None
 
 
 def test_resolve_impact_size_falls_back_to_file_size():

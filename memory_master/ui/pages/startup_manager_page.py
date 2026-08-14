@@ -8,9 +8,11 @@ moment on a machine with many tasks.
 """
 from __future__ import annotations
 
+import sys
 from typing import List, Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -27,7 +29,22 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from core.startup_programs import StartupEntry, add_startup_program, list_startup_entries, remove_startup_program
+from core.startup_programs import (
+    BootImpact,
+    StartupEntry,
+    add_startup_program,
+    extract_exe_path,
+    list_startup_entries,
+    remove_startup_program,
+)
+from core.system_health import Severity
+from widgets.status_pill import StatusPill
+
+if sys.platform == "win32":
+    from core.icons import get_icon_for_path
+else:
+    def get_icon_for_path(path: str):
+        return None
 
 _COL_NAME = 0
 _COL_SOURCE = 1
@@ -36,6 +53,11 @@ _COL_STATUS = 3
 _COL_COMMAND = 4
 
 _SOURCE_LABELS = {"registry": "레지스트리", "task_scheduler": "작업 스케줄러"}
+_IMPACT_TO_SEVERITY = {
+    BootImpact.LOW: Severity.GOOD,
+    BootImpact.MEDIUM: Severity.WARNING,
+    BootImpact.HIGH: Severity.CRITICAL,
+}
 
 
 class _ScanWorker(QThread):
@@ -115,9 +137,16 @@ class StartupManagerPage(QWidget):
     def _populate_table(self) -> None:
         self._table.setRowCount(len(self._entries))
         for row, entry in enumerate(self._entries):
-            self._table.setItem(row, _COL_NAME, QTableWidgetItem(entry.name))
+            name_item = QTableWidgetItem(entry.name)
+            exe_path = extract_exe_path(entry.command)
+            pixmap = get_icon_for_path(exe_path) if exe_path else None
+            if pixmap is not None:
+                name_item.setIcon(QIcon(pixmap))
+            self._table.setItem(row, _COL_NAME, name_item)
             self._table.setItem(row, _COL_SOURCE, QTableWidgetItem(_SOURCE_LABELS.get(entry.source, entry.source)))
-            self._table.setItem(row, _COL_IMPACT, QTableWidgetItem(entry.boot_impact.value))
+            self._table.setCellWidget(
+                row, _COL_IMPACT, StatusPill(_IMPACT_TO_SEVERITY[entry.boot_impact], text=entry.boot_impact.value)
+            )
             self._table.setItem(row, _COL_STATUS, QTableWidgetItem("사용" if entry.enabled else "사용 안 함"))
             self._table.setItem(row, _COL_COMMAND, QTableWidgetItem(entry.command))
 

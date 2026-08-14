@@ -66,7 +66,7 @@ class StartupEntry:
     boot_impact: BootImpact
 
 
-def _extract_exe_path(command: str) -> Optional[str]:
+def extract_exe_path(command: str) -> Optional[str]:
     """Registry Run values are often a full command line ("C:\\...\\app.exe"
     --flag), not a bare path - this pulls out just the executable part,
     handling both a quoted path and a bare unquoted one.
@@ -87,7 +87,7 @@ def _resolve_impact_size(command: str) -> int:
     actual boot cost than file size alone, which a self-extracting/
     compressed installer stub can make misleadingly small.
     """
-    exe_path = _extract_exe_path(command)
+    exe_path = extract_exe_path(command)
     if not exe_path:
         return 0
 
