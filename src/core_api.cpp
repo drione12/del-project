@@ -168,7 +168,12 @@ int EC_GetResultPath(EC_Handle handle, int index, wchar_t* outBuf, int outBufCha
     }
     int length = static_cast<int>(result->path.size());
     if (outBuf && outBufChars > 0) {
-        int toCopy = std::min(length, outBufChars - 1);
+        // Parenthesized as (std::min) rather than a plain call: windows.h
+        // #defines min/max as macros (no NOMINMAX here - see this file's
+        // top), which would otherwise rewrite this into garbage tokens
+        // right after "std::" (MSVC error C2589) before the compiler ever
+        // sees it as the std::min template call it's meant to be.
+        int toCopy = (std::min)(length, outBufChars - 1);
         std::copy(result->path.begin(), result->path.begin() + toCopy, outBuf);
         outBuf[toCopy] = L'\0';
     }
