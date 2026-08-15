@@ -42,13 +42,17 @@ constexpr size_t kMaxResults = 2000;
 constexpr UINT kTrayIconId = 1;
 constexpr int kShowHideHotkeyId = 1;
 
-// Category-filter button row (전체/음악/압축파일/문서/실행파일/폴더/이미지/비디오).
-// Local child-window IDs, not IDM_* menu command IDs - these aren't menu
-// items, same reasoning as kOptionsListId/etc. for the Options window's own
-// controls. Sequential so WM_COMMAND can recover the button index with one
-// subtraction instead of 8 separate case labels (MSVC has no case-range
-// extension to do this inside a switch).
-constexpr int kFilterAllId = 104;
+// Category filter (전체/음악/압축파일/문서/실행파일/폴더/이미지/비디오), shown as a
+// single combo box next to the search box - not a menu, since embed mode
+// (WS_CHILD, no window frame) never creates a menu bar at all (see the
+// CreateAppMenu() call site below), and the filter needs to work identically
+// whether this app is standalone or embedded inside Memory Master.
+// kCategoryComboId is a local child-window ID, not an IDM_* menu command ID,
+// same reasoning as kOptionsListId/etc. for the Options window's own
+// controls. kFilterButtonCount sizes kFilterLabels/kFilterCategories below
+// and is how many items get added to the combo box.
+constexpr int kCategoryComboId = 104;
+constexpr int kCategoryLabelId = 105;
 constexpr int kFilterButtonCount = 8;
 const wchar_t* kSingleInstanceMutexName = L"EverythingClone_SingleInstance_ceb2f6a1";
 const wchar_t* kWindowClassName = L"EverythingCloneWindow";
@@ -81,11 +85,12 @@ bool g_matchWholeWord = false;
 bool g_matchPath = false;
 bool g_useRegex = false;
 
-// Category-filter row state - which of the 8 buttons is currently checked.
-// Not persisted to settings.ini, matching the four toggles above (a quick
+// Category-filter state - which combo box item is currently selected. Not
+// persisted to settings.ini, matching the four toggles above (a quick
 // browsing filter, not durable configuration); resets to All on relaunch.
 ResultCategory g_activeCategory = ResultCategory::All;
-HWND g_filterButtons[kFilterButtonCount] = {};
+HWND g_categoryLabel = nullptr;
+HWND g_categoryCombo = nullptr;
 const wchar_t* const kFilterLabels[kFilterButtonCount] = {
     L"전체", L"음악", L"압축파일", L"문서", L"실행파일", L"폴더", L"이미지", L"비디오",
 };
@@ -1073,25 +1078,30 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 WS_CHILD | WS_VISIBLE | WS_DISABLED | ES_AUTOHSCROLL, 8, 32, 600, 26, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSearchBoxId)), nullptr, nullptr);
 
-            // Category-filter row - real placeholder geometry doesn't matter,
-            // the first WM_SIZE (already sent as part of window creation/
-            // ShowWindow, same as every other control here) repositions
-            // everything from scratch. BS_AUTORADIOBUTTON + WS_GROUP on only
-            // the first button is standard Win32: the OS handles mutual
-            // exclusion and checked-state rendering natively, no manual
-            // "uncheck the others" bookkeeping needed on click.
+            // Category filter - a combo box on the same row as the search
+            // box, not a menu (see the comment by kCategoryComboId's
+            // declaration for why) and not a button row anymore (a full row
+            // of 8 always-visible buttons read as cluttered in practice).
+            // Real placeholder geometry doesn't matter, the first WM_SIZE
+            // (already sent as part of window creation/ShowWindow, same as
+            // every other control here) repositions everything from scratch.
+            // Disabled until indexing finishes, matching g_searchBox.
+            g_categoryLabel = CreateWindowExW(
+                0, L"STATIC", L"카테고리:", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCategoryLabelId)), nullptr, nullptr);
+            g_categoryCombo = CreateWindowExW(
+                0, WC_COMBOBOXW, L"",
+                WS_CHILD | WS_VISIBLE | WS_DISABLED | WS_TABSTOP | CBS_DROPDOWNLIST, 0, 0, 0, 0, hwnd,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCategoryComboId)), nullptr, nullptr);
             for (int i = 0; i < kFilterButtonCount; i++) {
-                DWORD style = WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | (i == 0 ? WS_GROUP : 0);
-                g_filterButtons[i] = CreateWindowExW(
-                    0, L"BUTTON", kFilterLabels[i], style, 8 + i * 75, 64, 75, 24, hwnd,
-                    reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFilterAllId + i)), nullptr, nullptr);
+                SendMessageW(g_categoryCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kFilterLabels[i]));
             }
-            SendMessageW(g_filterButtons[0], BM_SETCHECK, BST_CHECKED, 0);  // 전체 selected by default
+            SendMessageW(g_categoryCombo, CB_SETCURSEL, 0, 0);  // 전체 selected by default
 
             g_resultsView = CreateWindowExW(
                 0, WC_LISTVIEWW, L"",
                 WS_CHILD | WS_VISIBLE | WS_BORDER | WS_GROUP | LVS_REPORT | LVS_OWNERDATA | LVS_EDITLABELS,
-                8, 96, 600, 400, hwnd,
+                8, 64, 600, 400, hwnd,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kResultsId)), nullptr, nullptr);
             ListView_SetExtendedListViewStyle(g_resultsView, LVS_EX_FULLROWSELECT);
 
@@ -1172,14 +1182,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             int w = LOWORD(lParam), h = HIWORD(lParam);
             MoveWindow(g_status, 8, 8, w - 16, 20, TRUE);
-            MoveWindow(g_searchBox, 8, 32, w - 16, 26, TRUE);
 
-            int filterButtonW = (w - 16) / kFilterButtonCount;
-            for (int i = 0; i < kFilterButtonCount; i++) {
-                MoveWindow(g_filterButtons[i], 8 + i * filterButtonW, 64, filterButtonW, 24, TRUE);
-            }
+            int comboW = 150, labelW = 60, gap = 8;
+            MoveWindow(g_searchBox, 8, 32, w - 16 - gap - labelW - gap - comboW, 26, TRUE);
+            MoveWindow(g_categoryLabel, w - 8 - comboW - gap - labelW, 32, labelW, 26, TRUE);
+            // nHeight=200 here is the *dropdown-open* list height (a
+            // CBS_DROPDOWNLIST quirk) - the closed-state height is
+            // font-driven and unaffected by this parameter.
+            MoveWindow(g_categoryCombo, w - 8 - comboW, 32, comboW, 200, TRUE);
 
-            int resultsY = 64 + 24 + 8;  // filter row's y + its height + margin
+            int resultsY = 64;  // search row's y + its height + margin
             MoveWindow(g_resultsView, 8, resultsY, w - 16, h - resultsY - 8, TRUE);
             int totalW = w - 16 - 20;  // minus scrollbar allowance
             ListView_SetColumnWidth(g_resultsView, 0, totalW * 16 / 100);
@@ -1197,6 +1209,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetWindowTextW(g_status, L"인덱싱 실패 - 이 프로그램을 관리자 권한으로 다시 실행하세요");
             } else {
                 EnableWindow(g_searchBox, TRUE);
+                EnableWindow(g_categoryCombo, TRUE);
                 SetFocus(g_searchBox);
                 // Populate the list immediately (real Everything shows every
                 // indexed item by default, not a blank screen until you type)
@@ -1238,12 +1251,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 RunSearch();
                 return 0;
             }
-            if (LOWORD(wParam) >= kFilterAllId && LOWORD(wParam) < kFilterAllId + kFilterButtonCount) {
-                // BS_AUTORADIOBUTTON already updated the checked button
-                // visually (and unchecked the rest) before this message
-                // arrives - just react to which one is now active.
-                g_activeCategory = kFilterCategories[LOWORD(wParam) - kFilterAllId];
-                RunSearch();
+            if (LOWORD(wParam) == kCategoryComboId && HIWORD(wParam) == CBN_SELCHANGE) {
+                int selectedIndex = static_cast<int>(SendMessageW(g_categoryCombo, CB_GETCURSEL, 0, 0));
+                if (selectedIndex != CB_ERR) {
+                    g_activeCategory = kFilterCategories[selectedIndex];
+                    RunSearch();
+                }
                 return 0;
             }
 
