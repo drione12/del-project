@@ -3,6 +3,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <objbase.h>
+#include <ole2.h>
 #include <oleidl.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -675,6 +676,91 @@ bool TryShowNativeContextMenu(HWND hwnd, const std::vector<std::wstring>& paths,
     return true;
 }
 
+// Minimal IDropSource for DoDragDrop below - just enough to let the OLE
+// drag loop know whether to keep going (mouse still down, Escape not
+// pressed) and to fall back to the system's default drag cursors. Only
+// ever used for the duration of a single DoDragDrop call in
+// StartDragDrop, so a plain (non-atomic) refcount is fine - it never
+// crosses threads.
+class DropSource : public IDropSource {
+public:
+    HRESULT __stdcall QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == IID_IUnknown || riid == IID_IDropSource) {
+            *ppv = static_cast<IDropSource*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    ULONG __stdcall AddRef() override { return ++m_refCount; }
+
+    ULONG __stdcall Release() override {
+        ULONG remaining = --m_refCount;
+        if (remaining == 0) delete this;
+        return remaining;
+    }
+
+    HRESULT __stdcall QueryContinueDrag(BOOL escapePressed, DWORD keyState) override {
+        if (escapePressed) return DRAGDROP_S_CANCEL;
+        if (!(keyState & (MK_LBUTTON | MK_RBUTTON))) return DRAGDROP_S_DROP;
+        return S_OK;
+    }
+
+    HRESULT __stdcall GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
+
+private:
+    ULONG m_refCount = 1;
+};
+
+// Drag-out support (this app -> Explorer/other apps): builds a shell
+// IDataObject from the selected paths and runs it through the standard
+// OLE drag loop. SHCreateDataObject (rather than a hand-rolled
+// IDataObject) is what makes the drop target see real CF_HDROP data,
+// the same as dragging out of Explorer itself. Passing pidlFolder as
+// nullptr together with fully-qualified (absolute) PIDLs is a
+// documented SHCreateDataObject mode specifically for a selection that
+// doesn't share one parent folder - unlike the native context menu
+// above, drag-out has no same-folder restriction to check first.
+//
+// The target negotiates DROPEFFECT_MOVE vs. DROPEFFECT_COPY (e.g. a
+// same-drive drop defaults to move-styled feedback in Explorer), and
+// either way the target receives the real files via CF_HDROP - but
+// this function doesn't inspect DoDragDrop's returned effect, so a
+// move-effect drop still leaves the originals in place here rather
+// than deleting them afterward. True move semantics need the source to
+// read back CFSTR_PERFORMEDDROPEFFECT after the call and then delete
+// the originals itself (the "optimized move" protocol Explorer uses) -
+// a separate, delete-adjacent feature deliberately left for a follow-up
+// round rather than bundled unreviewed into this one.
+void StartDragDrop(const std::vector<std::wstring>& paths) {
+    if (paths.empty()) return;
+
+    std::vector<LPITEMIDLIST> itemPidls;
+    std::vector<LPCITEMIDLIST> apidl;
+    for (auto& path : paths) {
+        LPITEMIDLIST pidl = nullptr;
+        if (SUCCEEDED(SHParseDisplayName(path.c_str(), nullptr, &pidl, 0, nullptr)) && pidl != nullptr) {
+            itemPidls.push_back(pidl);
+            apidl.push_back(pidl);
+        }
+    }
+    if (apidl.empty()) return;
+
+    IDataObject* dataObj = nullptr;
+    HRESULT hr = SHCreateDataObject(nullptr, static_cast<UINT>(apidl.size()), apidl.data(), nullptr,
+                                     IID_IDataObject, reinterpret_cast<void**>(&dataObj));
+    for (auto* p : itemPidls) CoTaskMemFree(p);
+    if (FAILED(hr) || dataObj == nullptr) return;
+
+    DropSource* dropSource = new DropSource();
+    DWORD effect = DROPEFFECT_NONE;
+    DoDragDrop(dataObj, dropSource, DROPEFFECT_COPY | DROPEFFECT_MOVE, &effect);
+    dropSource->Release();
+    dataObj->Release();
+}
+
 // Resizes+centers the main window on its monitor's work area. Restores
 // first if maximized, since SetWindowPos on a zoomed window is a no-op.
 void ApplyWindowSizePreset(HWND hwnd, int width, int height) {
@@ -1301,6 +1387,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                 }
                 return 0;
+            } else if (hdr->code == LVN_BEGINDRAG) {
+                // The common control already does mouse-drag-threshold
+                // detection itself before firing this - dragging any one of
+                // several selected rows drags the whole selection, matching
+                // Explorer's own multi-select drag behavior.
+                std::vector<std::wstring> paths;
+                GetSelectedResults(paths);
+                StartDragDrop(paths);
             }
             return 0;
         }
