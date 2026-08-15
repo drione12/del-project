@@ -4,7 +4,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from core.file_search import FileEntry, build_index, search  # noqa: E402
+from core.file_search import CATEGORIES, FileEntry, build_index, matches_category, search  # noqa: E402
 
 
 def _entry(name, path, is_dir=False):
@@ -146,3 +146,72 @@ def test_search_no_match_returns_empty_list():
     index = [_entry("a.txt", "/a.txt")]
 
     assert search(index, "zzz") == []
+
+
+def test_matches_category_all_matches_everything():
+    assert matches_category(_entry("a.txt", "/a.txt"), "all")
+    assert matches_category(_entry("dir", "/dir", is_dir=True), "all")
+
+
+def test_matches_category_music():
+    assert matches_category(_entry("song.mp3", "/song.mp3"), "music")
+    assert not matches_category(_entry("song.mp3", "/song.mp3"), "video")
+
+
+def test_matches_category_archive_multi_dot_name_uses_last_extension():
+    assert matches_category(_entry("backup.tar.gz", "/backup.tar.gz"), "archive")
+    assert not matches_category(_entry("backup.tar.gz", "/backup.tar.gz"), "document")
+
+
+def test_matches_category_document():
+    assert matches_category(_entry("report.docx", "/report.docx"), "document")
+
+
+def test_matches_category_executable():
+    assert matches_category(_entry("setup.exe", "/setup.exe"), "executable")
+
+
+def test_matches_category_image_is_broader_than_preview_gate():
+    # core.image_scanner.is_image_file (preview-gating) intentionally only
+    # covers formats QPixmap can decode - the category filter is broader.
+    assert matches_category(_entry("photo.heic", "/photo.heic"), "image")
+
+
+def test_matches_category_video():
+    assert matches_category(_entry("clip.mkv", "/clip.mkv"), "video")
+
+
+def test_matches_category_is_case_insensitive():
+    assert matches_category(_entry("PHOTO.JPG", "/PHOTO.JPG"), "image")
+
+
+def test_matches_category_folder():
+    folder = _entry("Documents", "/Documents", is_dir=True)
+    assert matches_category(folder, "folder")
+    assert matches_category(folder, "all")  # "all" still matches folders too
+    assert not matches_category(folder, "music")  # folders never match a type category
+
+
+def test_matches_category_folder_named_like_another_category_still_only_matches_folder():
+    fake_archive_dir = _entry("archive.zip", "/archive.zip", is_dir=True)
+    assert matches_category(fake_archive_dir, "folder")
+    assert not matches_category(fake_archive_dir, "archive")
+
+
+def test_matches_category_no_extension_matches_no_type_category():
+    entry = _entry("README", "/README")
+    for category in CATEGORIES:
+        if category == "all":
+            assert matches_category(entry, category)
+        else:
+            assert not matches_category(entry, category)
+
+
+def test_matches_category_leading_dot_name_matches_windows_native_semantics():
+    # Windows (and src/query.cpp's plain find_last_of('.')) has no Unix-style
+    # "dotfile" convention - to it, ".gitignore" is a nameless file with a
+    # ".gitignore" extension. This intentionally does NOT use
+    # os.path.splitext()'s Unix-flavored leading-dot handling, so this stays
+    # consistent with the separate C++ EverythingClone's own behavior.
+    assert matches_category(_entry(".mp3", "/.mp3"), "music")
+    assert not matches_category(_entry(".gitignore", "/.gitignore"), "document")

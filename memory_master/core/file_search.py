@@ -101,3 +101,80 @@ def search(index: List[FileEntry], query: str, match_path: bool = True) -> List[
         if all(term in haystack for term in terms):
             results.append(entry)
     return results
+
+
+# Category-filter extension sets, mirroring src/query.cpp's MatchesCategory
+# in the separate C++ EverythingClone (same categories, same extensions) so
+# the two apps' Search pages behave identically even though they share no
+# code. Lowercase, no leading dot - matches os.path.splitext()[1][1:].lower().
+# Deliberately a *new*, broader set for "image" here rather than reusing
+# core/image_scanner.py's own _IMAGE_EXTENSIONS - that one is intentionally
+# narrower, scoped to "can Qt's plain QPixmap decode this for the preview
+# panel", a different question from "is this an image file".
+_MUSIC_EXTENSIONS = frozenset({
+    "mp3", "wav", "wma", "aac", "flac", "ogg", "oga", "m4a", "opus",
+    "aiff", "aif", "ape", "alac", "mid", "midi", "amr", "au", "ra", "wv",
+})
+_ARCHIVE_EXTENSIONS = frozenset({
+    "zip", "zipx", "rar", "7z", "tar", "gz", "tgz", "bz2", "tbz2",
+    "xz", "txz", "iso", "cab", "arj", "lzh", "lha", "ace", "z", "wim",
+})
+_DOCUMENT_EXTENSIONS = frozenset({
+    "doc", "docx", "pdf", "txt", "rtf", "odt", "hwp", "hwpx",
+    "xls", "xlsx", "ods", "csv", "ppt", "pptx", "odp",
+    "md", "xps", "epub", "mobi", "log", "wpd", "tex",
+})
+_EXECUTABLE_EXTENSIONS = frozenset({
+    "exe", "msi", "bat", "cmd", "com", "scr", "ps1", "vbs",
+    "jar", "msp", "gadget", "appx", "appxbundle", "msix", "msixbundle",
+})
+_IMAGE_CATEGORY_EXTENSIONS = frozenset({
+    "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif",
+    "svg", "ico", "heic", "heif", "raw", "cr2", "nef", "arw",
+    "dng", "orf", "rw2", "psd", "avif", "jfif", "jp2",
+})
+_VIDEO_EXTENSIONS = frozenset({
+    "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "m4v",
+    "mpg", "mpeg", "mpe", "3gp", "3g2", "ts", "m2ts", "vob",
+    "ogv", "rm", "rmvb", "asf", "divx",
+})
+
+CATEGORIES = ("all", "music", "archive", "document", "executable", "folder", "image", "video")
+
+
+def matches_category(entry: FileEntry, category: str) -> bool:
+    """category must be one of CATEGORIES. "all" and "folder" need no
+    extension lookup (folder is attribute-based, like every other category
+    here it never matches a directory except this one).
+    """
+    if category == "all":
+        return True
+    if category == "folder":
+        return entry.is_dir
+    if entry.is_dir:
+        return False
+
+    # Last-dot-in-the-name, not os.path.splitext() - splitext treats a
+    # *leading* dot as part of the base name (its own deliberate handling
+    # for Unix-style dotfiles like ".gitignore"), which would disagree with
+    # the C++ side's plain name.find_last_of(L'.') for a name like that
+    # (name[1:] = "gitignore" there). Windows itself has no such dotfile
+    # convention - to it, ".gitignore" is simply a nameless file with a
+    # ".gitignore" extension - so matching the C++/Windows-native behavior
+    # here, not Python's Unix-flavored default, is the one that's actually
+    # consistent with the platform both apps target.
+    dot = entry.name.rfind(".")
+    ext = entry.name[dot + 1 :].lower() if dot != -1 else ""
+    if category == "music":
+        return ext in _MUSIC_EXTENSIONS
+    if category == "archive":
+        return ext in _ARCHIVE_EXTENSIONS
+    if category == "document":
+        return ext in _DOCUMENT_EXTENSIONS
+    if category == "executable":
+        return ext in _EXECUTABLE_EXTENSIONS
+    if category == "image":
+        return ext in _IMAGE_CATEGORY_EXTENSIONS
+    if category == "video":
+        return ext in _VIDEO_EXTENSIONS
+    return True

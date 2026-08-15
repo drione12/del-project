@@ -44,6 +44,7 @@ from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -62,7 +63,7 @@ from PyQt5.QtWidgets import (
 )
 
 from core.elevation import is_running_as_admin, request_admin_restart
-from core.file_search import FileEntry, build_index
+from core.file_search import CATEGORIES, FileEntry, build_index, matches_category
 from core.file_search import search as search_entries
 from core.force_delete import AnalyzeResult, ExecuteOptions, ExecuteResult, execute
 from core.formatting import format_bytes, format_datetime_kr
@@ -101,6 +102,25 @@ _COL_MODIFIED = 3
 _MAX_DISPLAYED_RESULTS = 2000
 _SEARCH_DEBOUNCE_MS = 200
 _PREVIEW_PLACEHOLDER_TEXT = "이미지를 선택하면\n미리보기가 표시됩니다"
+
+# (category, label) pairs for the filter-button row, in display order -
+# same categories/order as CATEGORIES (core/file_search.py) and the
+# separate C++ EverythingClone's own filter row (src/main.cpp).
+_CATEGORY_BUTTONS = (
+    ("all", "전체"),
+    ("music", "음악"),
+    ("archive", "압축파일"),
+    ("document", "문서"),
+    ("executable", "실행파일"),
+    ("folder", "폴더"),
+    ("image", "이미지"),
+    ("video", "비디오"),
+)
+# A typo'd category here wouldn't raise at runtime - matches_category falls
+# back to "matches everything" for an unrecognized category (mirroring
+# src/query.cpp's own default: case) - so this would otherwise fail silently
+# instead of loudly. Catches the mismatch immediately at import time instead.
+assert {category for category, _label in _CATEGORY_BUTTONS} == set(CATEGORIES)
 
 _BATCH_FORCE_DELETE_OPTIONS = ExecuteOptions(
     kill_locking_processes=False,
@@ -226,6 +246,7 @@ class _FallbackSearchView(QWidget):
         self._by_path: Dict[str, FileEntry] = {}
         self._worker: Optional[QThread] = None  # one at a time, mirrors CleanupPage
         self._auto_indexed = False  # first showEvent kicks off indexing, not __init__
+        self._active_category = "all"
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -290,6 +311,23 @@ class _FallbackSearchView(QWidget):
         layout.addLayout(row)
         return frame
 
+    def _build_category_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        self._category_group = QButtonGroup(self)
+        self._category_group.setExclusive(True)
+        for category, label in _CATEGORY_BUTTONS:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setChecked(category == "all")
+            self._category_group.addButton(btn)
+            btn.clicked.connect(lambda _checked, c=category: self._on_category_selected(c))
+            row.addWidget(btn)
+        return row
+
+    def _on_category_selected(self, category: str) -> None:
+        self._active_category = category
+        self._apply_search()
+
     def _build_search_section(self) -> QFrame:
         frame = QFrame()
         frame.setProperty("role", "card")
@@ -301,6 +339,8 @@ class _FallbackSearchView(QWidget):
         self._search_box.setEnabled(False)
         self._search_box.textChanged.connect(self._on_search_text_changed)
         layout.addWidget(self._search_box)
+
+        layout.addLayout(self._build_category_row())
 
         self._results_status_label = QLabel("")
         self._results_status_label.setStyleSheet("color: #8c92a4; font-size: 12px;")
@@ -382,6 +422,8 @@ class _FallbackSearchView(QWidget):
 
     def _apply_search(self) -> None:
         results = search_entries(self._index, self._search_box.text()) if self._index else []
+        if self._active_category != "all":
+            results = [e for e in results if matches_category(e, self._active_category)]
         self._populate_results(results)
 
     def _populate_results(self, results: List[FileEntry]) -> None:
