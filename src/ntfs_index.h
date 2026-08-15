@@ -9,6 +9,7 @@
 #include <winioctl.h>
 
 #include "file_entry.h"
+#include "query.h"  // ResultCategory, used by Search's category parameter below
 
 // One search hit: the resolved full path plus the metadata a results list
 // wants to show (and, later, filter/sort on) without re-resolving anything.
@@ -31,7 +32,8 @@ public:
     void ApplyUsnRecord(const USN_RECORD* record, HANDLE hVolume);
 
     std::vector<SearchResult> Search(const std::wstring& query, size_t maxResults,
-                                      const std::vector<std::wstring>& excludeFolders = {}) const;
+                                      const std::vector<std::wstring>& excludeFolders = {},
+                                      ResultCategory category = ResultCategory::All) const;
     size_t Count() const;
     wchar_t Drive() const { return driveLetter_; }
 

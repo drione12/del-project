@@ -507,6 +507,64 @@ bool InDupeSet(const std::unordered_set<uint64_t>* set, uint64_t frn) {
     return set && set->count(frn) != 0;
 }
 
+// Category-filter extension sets for MatchesCategory below - each a
+// function-local static so it's built once on first use rather than at
+// static-init time, same lazy-init shape as everywhere else in this file
+// that only needs a value the first time it's actually asked for. Every
+// entry is lowercase with no leading dot, matching MatchExt's own
+// actualExt above (name.substr(dot + 1), already lowercased).
+
+const std::unordered_set<std::wstring>& MusicExtensions() {
+    static const std::unordered_set<std::wstring> kExts = {
+        L"mp3", L"wav", L"wma", L"aac", L"flac", L"ogg", L"oga", L"m4a", L"opus",
+        L"aiff", L"aif", L"ape", L"alac", L"mid", L"midi", L"amr", L"au", L"ra", L"wv",
+    };
+    return kExts;
+}
+
+const std::unordered_set<std::wstring>& ArchiveExtensions() {
+    static const std::unordered_set<std::wstring> kExts = {
+        L"zip", L"zipx", L"rar", L"7z", L"tar", L"gz", L"tgz", L"bz2", L"tbz2",
+        L"xz", L"txz", L"iso", L"cab", L"arj", L"lzh", L"lha", L"ace", L"z", L"wim",
+    };
+    return kExts;
+}
+
+const std::unordered_set<std::wstring>& DocumentExtensions() {
+    static const std::unordered_set<std::wstring> kExts = {
+        L"doc", L"docx", L"pdf", L"txt", L"rtf", L"odt", L"hwp", L"hwpx",
+        L"xls", L"xlsx", L"ods", L"csv", L"ppt", L"pptx", L"odp",
+        L"md", L"xps", L"epub", L"mobi", L"log", L"wpd", L"tex",
+    };
+    return kExts;
+}
+
+const std::unordered_set<std::wstring>& ExecutableExtensions() {
+    static const std::unordered_set<std::wstring> kExts = {
+        L"exe", L"msi", L"bat", L"cmd", L"com", L"scr", L"ps1", L"vbs",
+        L"jar", L"msp", L"gadget", L"appx", L"appxbundle", L"msix", L"msixbundle",
+    };
+    return kExts;
+}
+
+const std::unordered_set<std::wstring>& ImageExtensions() {
+    static const std::unordered_set<std::wstring> kExts = {
+        L"jpg", L"jpeg", L"png", L"gif", L"bmp", L"webp", L"tiff", L"tif",
+        L"svg", L"ico", L"heic", L"heif", L"raw", L"cr2", L"nef", L"arw",
+        L"dng", L"orf", L"rw2", L"psd", L"avif", L"jfif", L"jp2",
+    };
+    return kExts;
+}
+
+const std::unordered_set<std::wstring>& VideoExtensions() {
+    static const std::unordered_set<std::wstring> kExts = {
+        L"mp4", L"avi", L"mkv", L"mov", L"wmv", L"flv", L"webm", L"m4v",
+        L"mpg", L"mpeg", L"mpe", L"3gp", L"3g2", L"ts", L"m2ts", L"vob",
+        L"ogv", L"rm", L"rmvb", L"asf", L"divx",
+    };
+    return kExts;
+}
+
 bool MatchesTerm(const QueryTerm& term, const MatchOptions& opts, const std::wstring& name,
                   const std::wstring& path, DWORD attributes, uint64_t size, uint64_t createdTime,
                   uint64_t modifiedTime, uint64_t accessedTime, uint64_t frn,
@@ -631,4 +689,24 @@ bool MatchesQuery(const Query& query, const std::wstring& name, const std::wstri
         if (allMatch) return true;
     }
     return false;
+}
+
+bool MatchesCategory(ResultCategory category, const std::wstring& name, DWORD attributes) {
+    if (category == ResultCategory::All) return true;
+    if (category == ResultCategory::Folder) return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if (attributes & FILE_ATTRIBUTE_DIRECTORY) return false;  // every other category is file-only
+
+    size_t dot = name.find_last_of(L'.');
+    if (dot == std::wstring::npos) return false;
+    std::wstring ext = ToLower(name.substr(dot + 1));
+
+    switch (category) {
+        case ResultCategory::Music: return MusicExtensions().count(ext) != 0;
+        case ResultCategory::Archive: return ArchiveExtensions().count(ext) != 0;
+        case ResultCategory::Document: return DocumentExtensions().count(ext) != 0;
+        case ResultCategory::Executable: return ExecutableExtensions().count(ext) != 0;
+        case ResultCategory::Image: return ImageExtensions().count(ext) != 0;
+        case ResultCategory::Video: return VideoExtensions().count(ext) != 0;
+        default: return true;
+    }
 }

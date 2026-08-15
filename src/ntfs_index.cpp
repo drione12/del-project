@@ -256,7 +256,8 @@ void NtfsIndex::ApplyUsnRecord(const USN_RECORD* record, HANDLE hVolume) {
 }
 
 std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText, size_t maxResults,
-                                             const std::vector<std::wstring>& excludeFolders) const {
+                                             const std::vector<std::wstring>& excludeFolders,
+                                             ResultCategory category) const {
     std::vector<SearchResult> results;
 
     // An empty query (nothing typed, or only inline toggles like "case:"
@@ -334,12 +335,13 @@ std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText, size_
 
     for (const auto& [frn, entry] : records_) {
         std::wstring path;
+        bool pathResolved = false;
         bool matched;
         if (matchAll) {
             matched = true;
-            path = ResolvePathLocked(frn);
         } else if (query.options.matchPath) {
             path = ResolvePathLocked(frn);
+            pathResolved = true;
             matched = MatchesQuery(query, entry.name, path, entry.attributes, entry.size,
                                     entry.createdTime, entry.modifiedTime, entry.accessedTime,
                                     frn, &dupes);
@@ -347,9 +349,21 @@ std::vector<SearchResult> NtfsIndex::Search(const std::wstring& queryText, size_
             matched = MatchesQuery(query, entry.name, std::wstring(), entry.attributes,
                                     entry.size, entry.createdTime, entry.modifiedTime,
                                     entry.accessedTime, frn, &dupes);
-            if (matched) path = ResolvePathLocked(frn);
+        }
+
+        // Applied after the text/attrib/etc. query match (cheap - only
+        // needs name+attributes, no path resolution) but before path
+        // resolution below, and unconditionally including the matchAll
+        // fast path above - a category filter with an empty search box
+        // (the common case: click "이미지" with nothing typed) must still
+        // see every record, not just ones a non-empty query would have
+        // matched.
+        if (matched && category != ResultCategory::All) {
+            matched = MatchesCategory(category, entry.name, entry.attributes);
         }
         if (!matched) continue;
+
+        if (!pathResolved) path = ResolvePathLocked(frn);
         if (!excludeFolders.empty() && IsUnderAnyFolder(path, excludeFolders)) continue;
 
         results.push_back(

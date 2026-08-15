@@ -78,3 +78,16 @@ Query ParseQuery(const std::wstring& raw);
 bool MatchesQuery(const Query& query, const std::wstring& name, const std::wstring& path,
                    DWORD attributes, uint64_t size, uint64_t createdTime, uint64_t modifiedTime,
                    uint64_t accessedTime, uint64_t frn = 0, const DupeMembership* dupes = nullptr);
+
+// The Search-page filter row's categories - deliberately separate from the
+// ext:/attrib: query syntax above rather than reusing QueryTerm/Query, since
+// unlike a typed query term this needs to apply uniformly regardless of
+// query grouping (including the empty-query "match everything" fast path,
+// which never touches Query/MatchesQuery at all - see NtfsIndex::Search).
+enum class ResultCategory { All, Music, Archive, Document, Executable, Folder, Image, Video };
+
+// Category membership is extension-based (case-insensitive) for every
+// category except Folder, which is attribute-based; folders never match any
+// other category regardless of name. name is the file/folder name only (not
+// the full path) - matches how MatchExt above already only needs the name.
+bool MatchesCategory(ResultCategory category, const std::wstring& name, DWORD attributes);
