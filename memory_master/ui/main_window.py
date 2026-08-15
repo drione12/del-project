@@ -10,6 +10,8 @@ needing to be relaunched.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 
@@ -39,7 +41,7 @@ _PLACEHOLDER_SUBTITLE = "곧 추가될 예정입니다."
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, start_page: Optional[str] = None):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setWindowTitle("Memory Master")
@@ -77,7 +79,9 @@ class MainWindow(QMainWindow):
         self._build_pages()
 
         self._tray = setup_tray(self)
-        self.go_to_page("dashboard")
+        # Falls back to the default rather than silently doing nothing on
+        # an invalid/garbage value (e.g. a malformed --start-page).
+        self.go_to_page(start_page if start_page in self._page_indices else "dashboard")
 
     def _build_pages(self) -> None:
         for page_id, icon_name, tooltip in _PAGES:

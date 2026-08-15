@@ -9,17 +9,11 @@ from core.force_delete import (  # noqa: E402
     _secure_shred_file,
     analyze,
     execute,
-    is_running_as_admin,
 )
 
 _SAFE_OPTIONS = ExecuteOptions(
     kill_locking_processes=False, take_ownership_on_failure=False, secure_shred=False, reboot_delete_fallback=False
 )
-
-
-def test_is_running_as_admin_is_false_off_windows():
-    if sys.platform != "win32":
-        assert is_running_as_admin() is False
 
 
 def test_analyze_blocks_protected_path():

@@ -40,6 +40,7 @@ from typing import Callable, List, Optional
 import psutil
 
 from core.critical_processes import is_critical
+from core.elevation import is_running_as_admin
 from core.logging_setup import get_logger
 from core.ownership import clear_readonly, grant_full_control, take_ownership
 from core.path_guard import is_protected
@@ -68,36 +69,6 @@ class AnalyzeResult:
     file_count: int
     total_bytes: int
     locking_processes: List[LockingProcess] = field(default_factory=list)
-
-
-def is_running_as_admin() -> bool:
-    if sys.platform != "win32":
-        return False
-    try:
-        import ctypes
-
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        logger.warning("IsUserAnAdmin check failed", exc_info=True)
-        return False
-
-
-def request_admin_restart() -> bool:
-    """Re-launches this app elevated via the UAC prompt (the "runas" shell
-    verb). Does not exit the current, non-elevated instance itself -
-    that's left to the caller (typically: launch elevated, then quit).
-    """
-    if sys.platform != "win32":
-        return False
-    import ctypes
-
-    try:
-        args = " ".join(f'"{a}"' for a in sys.argv)
-        result = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, args, None, 1)
-        return result > 32  # ShellExecuteW: any return > 32 means success
-    except Exception:
-        logger.warning("restart-as-admin failed", exc_info=True)
-        return False
 
 
 def _scan(path: str):

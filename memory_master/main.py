@@ -1,6 +1,7 @@
 """Memory Master entry point."""
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 
@@ -23,14 +24,25 @@ def _load_stylesheet(theme: str) -> str:
         return ""
 
 
+def _parse_args(argv: list) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--start-page", default=None)
+    # parse_known_args (not parse_args): any other/unrecognized argument -
+    # e.g. one Qt itself understands - is left alone rather than treated as
+    # an error, since this app has never validated its own argv before.
+    args, _unknown = parser.parse_known_args(argv)
+    return args
+
+
 def main() -> int:
     config = load_config()
+    args = _parse_args(sys.argv[1:])
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # tray keeps the app alive when the window is hidden
     app.setStyleSheet(_load_stylesheet(config.theme))
 
-    window = MainWindow()
+    window = MainWindow(start_page=args.start_page)
     if config.always_on_top:
         window.setWindowFlag(Qt.WindowStaysOnTopHint, True)
     window.setWindowOpacity(config.opacity)
