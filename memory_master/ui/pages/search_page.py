@@ -44,7 +44,7 @@ from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QButtonGroup,
+    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -103,10 +103,15 @@ _MAX_DISPLAYED_RESULTS = 2000
 _SEARCH_DEBOUNCE_MS = 200
 _PREVIEW_PLACEHOLDER_TEXT = "이미지를 선택하면\n미리보기가 표시됩니다"
 
-# (category, label) pairs for the filter-button row, in display order -
-# same categories/order as CATEGORIES (core/file_search.py) and the
-# separate C++ EverythingClone's own filter row (src/main.cpp).
-_CATEGORY_BUTTONS = (
+# (category, label) pairs for the category filter dropdown, in display order
+# - same categories/order as CATEGORIES (core/file_search.py) and the
+# separate C++ EverythingClone's own filter combo box (src/main.cpp). A
+# combo box rather than a button row: this page and EverythingClone's own
+# window are meant to stay in sync as EverythingClone's own feature set
+# evolves (see memory_master/README.md), and a dropdown is what
+# EverythingClone settled on there after a full button row read as
+# cluttered - not a one-off choice specific to this file.
+_CATEGORY_OPTIONS = (
     ("all", "전체"),
     ("music", "음악"),
     ("archive", "압축파일"),
@@ -120,7 +125,7 @@ _CATEGORY_BUTTONS = (
 # back to "matches everything" for an unrecognized category (mirroring
 # src/query.cpp's own default: case) - so this would otherwise fail silently
 # instead of loudly. Catches the mismatch immediately at import time instead.
-assert {category for category, _label in _CATEGORY_BUTTONS} == set(CATEGORIES)
+assert {category for category, _label in _CATEGORY_OPTIONS} == set(CATEGORIES)
 
 _BATCH_FORCE_DELETE_OPTIONS = ExecuteOptions(
     kill_locking_processes=False,
@@ -311,21 +316,18 @@ class _FallbackSearchView(QWidget):
         layout.addLayout(row)
         return frame
 
-    def _build_category_row(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        self._category_group = QButtonGroup(self)
-        self._category_group.setExclusive(True)
-        for category, label in _CATEGORY_BUTTONS:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setChecked(category == "all")
-            self._category_group.addButton(btn)
-            btn.clicked.connect(lambda _checked, c=category: self._on_category_selected(c))
-            row.addWidget(btn)
-        return row
+    def _build_category_combo(self) -> QComboBox:
+        combo = QComboBox()
+        combo.setEnabled(False)  # matches self._search_box - enabled together in _on_index_ready
+        for category, label in _CATEGORY_OPTIONS:
+            combo.addItem(label, category)
+        combo.setCurrentIndex(0)  # 전체 selected by default
+        self._category_combo = combo
+        combo.currentIndexChanged.connect(self._on_category_selected)
+        return combo
 
-    def _on_category_selected(self, category: str) -> None:
-        self._active_category = category
+    def _on_category_selected(self, _index: int) -> None:
+        self._active_category = self._category_combo.currentData()
         self._apply_search()
 
     def _build_search_section(self) -> QFrame:
@@ -334,13 +336,15 @@ class _FallbackSearchView(QWidget):
         layout = QVBoxLayout(frame)
         layout.addWidget(_section_title("검색"))
 
+        search_row = QHBoxLayout()
         self._search_box = QLineEdit()
         self._search_box.setPlaceholderText("인덱싱 중...")
         self._search_box.setEnabled(False)
         self._search_box.textChanged.connect(self._on_search_text_changed)
-        layout.addWidget(self._search_box)
-
-        layout.addLayout(self._build_category_row())
+        search_row.addWidget(self._search_box, 1)
+        search_row.addWidget(QLabel("카테고리:"))
+        search_row.addWidget(self._build_category_combo())
+        layout.addLayout(search_row)
 
         self._results_status_label = QLabel("")
         self._results_status_label.setStyleSheet("color: #8c92a4; font-size: 12px;")
@@ -390,6 +394,7 @@ class _FallbackSearchView(QWidget):
             return
         self._reindex_btn.setEnabled(False)
         self._search_box.setEnabled(False)
+        self._category_combo.setEnabled(False)
         self._results_table.setRowCount(0)
         self._index_status_label.setText("인덱싱 중... (전체 드라이브, 다소 시간이 걸릴 수 있습니다)")
 
@@ -413,6 +418,7 @@ class _FallbackSearchView(QWidget):
         self._index_status_label.setText(f"{len(entries)}개 항목 인덱싱됨")
         self._search_box.setEnabled(True)
         self._search_box.setPlaceholderText("검색어 입력...")
+        self._category_combo.setEnabled(True)
         self._apply_search()
 
     # -- search -------------------------------------------------------------
