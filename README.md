@@ -12,12 +12,13 @@ voidtools의 [Everything](https://www.voidtools.com/)이 파일을 즉시 검색
 6. **설정 + 인덱스 영속화** (`settings.cpp`, `ntfs_index.cpp: SaveToFile`/`LoadFromFile`, `usn_watcher.cpp: CatchUp`): 종료할 때 각 볼륨의 인덱스를 USN 저널 위치(저널 ID + 다음 USN)와 함께 `%APPDATA%\EverythingClone\index_<드라이브문자>.bin` 에 저장합니다. 다음 실행 때는 그 스냅샷을 그대로 불러온 뒤, 저장된 위치부터 지금까지의 USN 저널만 짧게 재생해서 꺼져 있던 동안 생긴 변경사항을 반영합니다 — 저널 ID가 바뀌어 있으면(볼륨 포맷 등으로 저널이 초기화된 경우) 스냅샷을 버리고 처음부터 다시 스캔합니다. 도구 → 옵션에서 검색 결과에 안 보이게 할 폴더를 추가/제거할 수 있습니다(`%APPDATA%\EverythingClone\settings.ini`) — 인덱스 자체에서 빼는 게 아니라 검색 결과에서만 숨기는 방식입니다(구조상 MFT 전체 열거 단계에서 폴더별로 걸러내려면 레코드마다 전체 경로를 미리 계산해야 해서 느려짐).
 7. **보기 메뉴** (`main.cpp: ApplyWindowSizePreset`/`ShowFontAndColorDialog`): 창 크기는 작게/보통/크게/최대화 중 골라서 바로 적용(작업 영역 중앙 정렬)됩니다. 글꼴 및 색은 표준 글꼴 선택 대화상자(글자색 포함)에 이어 표준 색 선택 대화상자(배경색)를 순서대로 띄우는 방식 — 실제 Everything의 미리보기가 있는 전용 대화상자보다는 단순하지만, 로컬에서 직접 실행해볼 수 없는 환경이라 손으로 만든 다이얼로그 템플릿보다는 검증된 표준 대화상자 두 개를 쓰는 쪽을 택했습니다. 선택한 글꼴/색은 `settings.ini` 에 저장되어 다음 실행에도 유지됩니다.
 8. **DPI 인식** (`app.manifest`): 매니페스트에 `dpiAware` 를 선언해서 고해상도(스케일링 100% 초과) 모니터에서 Windows가 창 전체를 비트맵으로 늘려 그리지 않게 합니다 — 이게 없으면 글자가 흐리게/번져 보입니다.
+9. **EverythingCore.dll** (`core_api.h`/`core_api.cpp`): 위 1~3번 엔진(`ntfs_index.cpp`, `usn_watcher.cpp`, `query.cpp`, `mft_record.cpp`, `volume_utils.cpp`, `privileges.cpp`, `settings.cpp` — `main.cpp`의 창/UI 코드만 빼고 전부)을 그대로 재사용해 `main.cpp` 대신 얇은 flat C API로 감싼 DLL 빌드 타깃입니다. Memory Master(`memory_master/`)가 `ctypes`로 이 DLL을 자기 프로세스 안에 직접 불러 써서, 별도 `EverythingClone.exe`를 띄우고 그 창을 심는 방식(예전 방식) 없이도 이 엔진을 그대로 쓸 수 있게 합니다 — `memory_master/README.md` 참고.
 
 ## 빌드
 
 ### 방법 1: GitHub Actions (로컬에 아무것도 설치 안 해도 됨)
 
-이 저장소를 push 하면 `.github/workflows/build.yml` 이 GitHub의 Windows 클라우드 러너에서 자동으로 빌드하고, 결과 `EverythingClone.exe` 를 워크플로 실행 결과 페이지의 **Artifacts** 에서 다운로드할 수 있습니다. 로컬에 Visual Studio/CMake를 설치할 필요가 없습니다.
+이 저장소를 push 하면 `.github/workflows/build.yml` 이 GitHub의 Windows 클라우드 러너에서 자동으로 빌드하고, 결과 `EverythingClone.exe`와 `EverythingCore.dll`(위 9번 참고 — Memory Master가 쓰는 쪽)을 각각 워크플로 실행 결과 페이지의 **Artifacts** 에서 다운로드할 수 있습니다. 로컬에 Visual Studio/CMake를 설치할 필요가 없습니다.
 
 ### 방법 2: 로컬에서 직접 빌드 (Windows 필요)
 
@@ -37,9 +38,9 @@ cmake --build build --config Release
 - 검색창에 타이핑하면 바로 아래 목록이 갱신됩니다. 컬럼 헤더 클릭으로 정렬, 결과 더블클릭으로 열기, 우클릭으로 컨텍스트 메뉴(열기/포함 폴더 열기/경로 복사/삭제/속성).
 - **분류 필터**: 검색창 오른쪽의 "카테고리:" 드롭다운(전체/음악/압축파일/문서/실행파일/폴더/이미지/비디오)에서
   하나를 고르면 결과가 그 종류로 좁혀집니다(확장자 기준, 폴더는 예외). 검색어와 함께 쓸 수 있고, 검색창이
-  비어 있어도(즉 "전체 목록" 상태에서도) 바로 적용됩니다. 버튼 한 줄 대신 드롭다운 하나인 이유: Memory
-  Master에 `--embed-parent-hwnd`로 심어졌을 때도(창 프레임이 없어 메뉴바를 못 씀) 항상 똑같이 동작해야
-  해서입니다.
+  비어 있어도(즉 "전체 목록" 상태에서도) 바로 적용됩니다. 버튼 한 줄 대신 드롭다운 하나인 이유: 이 창이
+  `--embed-parent-hwnd`로 다른 프로그램 안에 심어질 때도(창 프레임이 없어 메뉴바를 못 씀) 항상 똑같이
+  동작해야 해서입니다.
 - 인덱싱이 0건으로 끝나면(관리자 권한 없이 실행한 경우 등) 상단 상태 표시줄에 안내 문구가 뜹니다.
 - **시스템 트레이**: 창을 최소화하면 작업 표시줄 대신 트레이 아이콘으로 들어갑니다. 트레이 아이콘 좌클릭/더블클릭으로 다시 열고, 우클릭하면 열기/종료 메뉴가 뜹니다. **Ctrl+Alt+Space**로 어디서든 창을 보이기/숨기기 전환할 수 있습니다 (아직 설정 화면이 없어 단축키는 고정값입니다).
 - **중복 실행 방지**: exe를 또 실행하면 새 창을 띄우는 대신 이미 떠 있는 창을 앞으로 가져옵니다 (볼륨을 두 번 인덱싱하지 않음).
@@ -47,8 +48,9 @@ cmake --build build --config Release
 - **도구 → 옵션**: 검색 결과에서 숨기고 싶은 폴더를 추가/제거할 수 있습니다.
 - **(고급) 임베드 모드**: `--embed-parent-hwnd <값> [--embed-width <값>] [--embed-height <값>]`으로 실행하면
   창을 독립된 최상위 창이 아니라 지정한 HWND의 자식 창(`WS_CHILD`)으로 만듭니다 - 트레이 아이콘/전역
-  단축키/메뉴바/중복 실행 방지는 모두 꺼집니다. 사람이 직접 칠 옵션이 아니라, Memory Master처럼 이 창을
-  자기 UI 안에 심고 싶은 다른 프로그램이 쓰는 내부 연동용 옵션입니다.
+  단축키/메뉴바/중복 실행 방지는 모두 꺼집니다. 사람이 직접 칠 옵션이 아니라, 이 창을 자기 UI 안에
+  심고 싶은 다른 프로그램이 쓰는 내부 연동용 옵션입니다 (Memory Master는 더 이상 이 방식을 쓰지 않습니다 -
+  지금은 `EverythingCore.dll`을 자기 프로세스 안에 직접 불러 씁니다, 아래 참고).
 
 ## 검색 문법
 

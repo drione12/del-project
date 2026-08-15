@@ -27,3 +27,10 @@ jobs:
           name: EverythingClone
           path: build/Release/EverythingClone.exe
           retention-days: 90
+
+      - name: Upload EverythingCore.dll
+        uses: actions/upload-artifact@v4
+        with:
+          name: EverythingCore
+          path: build/Release/EverythingCore.dll
+          retention-days: 90

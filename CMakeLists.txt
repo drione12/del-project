@@ -39,3 +39,32 @@ target_compile_definitions(EverythingClone PRIVATE UNICODE _UNICODE)
 # active ANSI code page instead, so every non-ASCII (Korean) string
 # literal comes out mojibake despite compiling with no errors.
 target_compile_options(EverythingClone PRIVATE /utf-8)
+
+# EverythingCore.dll: the same indexing/search engine as EverythingClone.exe
+# above (every source file it uses except main.cpp itself, which is the
+# .exe's own WinMain/window/menu/UI code - nothing else in this project
+# touches a window handle, see src/core_api.h) built as a DLL instead of an
+# .exe, with src/core_api.cpp's flat C API as its entry points. This is
+# what memory_master/core/fast_search.py loads via ctypes so Memory Master
+# gets EverythingClone's engine running in its own process directly,
+# instead of spawning and window-embedding a separate EverythingClone.exe
+# (the old approach - see memory_master/README.md).
+add_library(EverythingCore SHARED
+    src/core_api.cpp
+    src/ntfs_index.cpp
+    src/usn_watcher.cpp
+    src/privileges.cpp
+    src/volume_utils.cpp
+    src/text_match.cpp
+    src/query.cpp
+    src/mft_record.cpp
+    src/settings.cpp
+)
+
+# advapi32: privileges.cpp's AdjustTokenPrivileges/LookupPrivilegeValueW.
+# shell32: settings.cpp's SHGetFolderPathW. Deliberately not comctl32/ole32/
+# comdlg32/uuid - those are main.cpp's own GUI controls/shell context menu/
+# OLE drag-drop, none of which this DLL exposes.
+target_link_libraries(EverythingCore PRIVATE advapi32 shell32)
+target_compile_definitions(EverythingCore PRIVATE UNICODE _UNICODE EVERYTHINGCORE_EXPORTS)
+target_compile_options(EverythingCore PRIVATE /utf-8)

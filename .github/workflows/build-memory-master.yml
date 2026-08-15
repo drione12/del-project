@@ -38,17 +38,21 @@ jobs:
 
       # Built fresh in this job (rather than reused from build.yml's own
       # artifact) so packaging never depends on a separate, independently
-      # triggered workflow run being fresh/present - see search_page.py's
-      # _EmbeddedSearchView, which needs EverythingClone.exe bundled
-      # alongside MemoryMaster.exe to embed at runtime.
-      - name: Configure EverythingClone
+      # triggered workflow run being fresh/present - core/fast_search.py
+      # loads EverythingCore.dll via ctypes at runtime, so it needs to be
+      # bundled alongside MemoryMaster.exe. This also builds the
+      # EverythingClone.exe target (cmake --build with no --target builds
+      # everything in CMakeLists.txt), which Memory Master itself no longer
+      # uses - left as-is for simplicity rather than adding a --target flag
+      # to skip it, since it's a small extra build cost, not a bundled one.
+      - name: Configure
         run: cmake -B build
 
-      - name: Build EverythingClone
+      - name: Build
         run: cmake --build build --config Release
 
-      - name: Bundle EverythingClone.exe into Memory Master resources
-        run: Copy-Item build\Release\EverythingClone.exe memory_master\resources\EverythingClone.exe
+      - name: Bundle EverythingCore.dll into Memory Master resources
+        run: Copy-Item build\Release\EverythingCore.dll memory_master\resources\EverythingCore.dll
 
       - uses: actions/setup-python@v5
         with:

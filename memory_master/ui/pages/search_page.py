@@ -1,35 +1,31 @@
-"""File search page ("파일 검색"). Two views behind one coordinator,
-switched once at construction based on whether this process is elevated:
+"""File search page ("파일 검색") - one QWidget (SearchPage) whose UI never
+changes, but whose indexing/search backend does: FastSearchEngine
+(core/fast_search.py, backed by EverythingCore.dll - see src/core_api.h,
+the same NTFS MFT index + USN journal watcher EverythingClone.exe uses) in
+this same process when elevated and the DLL is available, else
+core/file_search.py's slower from-scratch Python os.walk index otherwise.
 
-  _EmbeddedSearchView - shown when running as administrator. Launches
-  EverythingClone.exe (src/, this repo's separate C++/Win32 Everything
-  clone - raw NTFS MFT index + live USN journal watching) with the
-  --embed-parent-hwnd flag added for exactly this purpose, and hosts its
-  window as a real WS_CHILD window inside this page via core/
-  everything_embed.py's ctypes helpers - not a second separate window.
-  EverythingClone itself requires admin rights (raw volume handles), and
-  Windows blocks/degrades window-parenting across different integrity
-  levels (UIPI), which is why this whole page is elevation-gated rather
-  than just launching the child unconditionally.
+Used to be two entirely separate view classes - an embedded native
+EverythingClone.exe child window (spawned as a subprocess, its window
+parented into this page via core/everything_embed.py's ctypes helpers) vs.
+this page's own from-scratch Python search - picked by a thin coordinator.
+Collapsed into this one class now that the fast path also renders through
+this same QTableWidget-based UI instead of hosting a second process's own
+window: EverythingClone's engine runs in-process via ctypes now, so there's
+no second window to host, no subprocess to manage, and no UIPI concern
+(Windows blocking/degrading window-parenting across different integrity
+levels, since EverythingClone needs admin and this app doesn't always run
+elevated) - that risk simply doesn't exist anymore because there's no
+cross-process window parenting happening at all. See memory_master/
+README.md for more on why this changed.
 
-  _FallbackSearchView - shown otherwise: today's original from-scratch
-  Python search (core/file_search.py's build_index walks every fixed
-  drive via plain os.walk, then the in-memory index is searched instantly
-  as you type - no raw MFT index, no persistence, no live updates; see
-  memory_master/README.md), plus a banner offering to restart the whole
-  app elevated (core/elevation.py's request_admin_restart, generalized
-  from its original force-delete-only use so the relaunched instance can
-  pass --start-page search and land right back here). Never removed: the
-  Search page should never be a dead "you need admin" screen with nothing
-  usable, and this is already-working, already-tested code.
-
-Delete/force-delete on the fallback view reuses the same hardened
-core/force_delete.py pipeline as the Cleanup page's drop zone (single
-selection reuses that exact analyze/confirm/execute flow, multi-selection
-uses a batch flow with one confirmation and no kill-list, mirroring
-ui/dialogs/duplicate_image_manager.py's existing batch-delete precedent);
-the embedded view's own force-delete (EverythingClone's native context
-menu) is a separate, independent implementation on the C++ side.
+Delete/force-delete reuses the same hardened core/force_delete.py pipeline
+as the Cleanup page's drop zone (single selection reuses that exact
+analyze/confirm/execute flow, multi-selection uses a batch flow with one
+confirmation and no kill-list, mirroring
+ui/dialogs/duplicate_image_manager.py's existing batch-delete precedent) -
+identical for both backends, since it only ever operates on a FileEntry's
+path, not on how that FileEntry was found.
 """
 from __future__ import annotations
 
@@ -55,7 +51,6 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -63,12 +58,13 @@ from PyQt5.QtWidgets import (
 )
 
 from core.elevation import is_running_as_admin, request_admin_restart
+from core.fast_search import FastSearchEngine
+from core.fast_search import is_available as fast_search_available
 from core.file_search import CATEGORIES, FileEntry, build_index, matches_category
 from core.file_search import search as search_entries
 from core.force_delete import AnalyzeResult, ExecuteOptions, ExecuteResult, execute
 from core.formatting import format_bytes, format_datetime_kr
 from core.image_scanner import is_image_file
-from core.resource_path import resource_path
 from core.trash import send_to_trash
 from core.workers import AnalyzeWorker, ExecuteWorker
 from ui.dialogs.confirm_force_delete import ConfirmForceDeleteDialog
@@ -77,21 +73,6 @@ if sys.platform == "win32":
     from core.icons import get_icon_for_path
 else:
     def get_icon_for_path(path: str, is_dir: bool = False):
-        return None
-
-if sys.platform == "win32":
-    from core.everything_embed import build_launch_args, find_child_hwnd, request_graceful_close, resize_child
-else:
-    def build_launch_args(exe_path: str, parent_hwnd: int, width: int, height: int) -> List[str]:
-        return []
-
-    def find_child_hwnd(parent_hwnd: int) -> Optional[int]:
-        return None
-
-    def resize_child(child_hwnd: int, width: int, height: int) -> None:
-        return None
-
-    def request_graceful_close(child_hwnd: int) -> None:
         return None
 
 _COL_NAME = 0
@@ -103,14 +84,12 @@ _MAX_DISPLAYED_RESULTS = 2000
 _SEARCH_DEBOUNCE_MS = 200
 _PREVIEW_PLACEHOLDER_TEXT = "이미지를 선택하면\n미리보기가 표시됩니다"
 
-# (category, label) pairs for the category filter dropdown, in display order
-# - same categories/order as CATEGORIES (core/file_search.py) and the
-# separate C++ EverythingClone's own filter combo box (src/main.cpp). A
-# combo box rather than a button row: this page and EverythingClone's own
-# window are meant to stay in sync as EverythingClone's own feature set
-# evolves (see memory_master/README.md), and a dropdown is what
-# EverythingClone settled on there after a full button row read as
-# cluttered - not a one-off choice specific to this file.
+# (category, label) pairs for the category filter dropdown, in display
+# order - same categories/order as CATEGORIES (core/file_search.py) and the
+# separate C++ EverythingClone's own filter combo box (src/main.cpp). This
+# page and EverythingClone are meant to stay in sync as EverythingClone's
+# own feature set evolves (see memory_master/README.md), not just for this
+# one filter.
 _CATEGORY_OPTIONS = (
     ("all", "전체"),
     ("music", "음악"),
@@ -134,17 +113,14 @@ _BATCH_FORCE_DELETE_OPTIONS = ExecuteOptions(
     reboot_delete_fallback=True,
 )
 
-_EMBED_POLL_INTERVAL_MS = 100
-_EMBED_POLL_BUDGET_MS = 10000
-_EMBED_MIN_WIDTH = 200
-_EMBED_MIN_HEIGHT = 150
-
 
 def _fixed_drive_roots() -> List[str]:
     """Every currently-mounted drive except optical media (an empty
     CD/DVD drive can hang or error on enumeration, and isn't useful to
     index anyway) - this is what "그냥 모든 파일 폴더 보여주는 식" (just show
     everything) resolves to: no folder picker, whole-machine coverage.
+    Only used by the slow os.walk backend - the fast backend detects fixed
+    NTFS volumes itself (src/volume_utils.cpp's DetectNtfsFixedDrives).
     """
     try:
         partitions = psutil.disk_partitions(all=False)
@@ -175,6 +151,8 @@ class _ResultsTable(QTableWidget):
 
 
 class _IndexWorker(QThread):
+    """Slow backend: builds core/file_search.py's os.walk-based index."""
+
     progress = pyqtSignal(int, int)
     resultReady = pyqtSignal(list)  # List[FileEntry]
 
@@ -194,6 +172,25 @@ class _IndexWorker(QThread):
             compute_total=False,  # a whole-drive pre-count would double an already-long walk
         )
         self.resultReady.emit(entries)
+
+
+class _FastIndexWorker(QThread):
+    """Fast backend: runs FastSearchEngine.build_index() (blocking - a
+    first-ever run with no saved snapshot to catch up from walks the whole
+    MFT) off the UI thread, same reasoning as _IndexWorker above. No
+    cancel() - EC_BuildIndex is one blocking C++ call with no cancellation
+    hook exposed (see SearchPage.stop()'s docstring for how shutdown
+    handles a build that's still running when the app closes).
+    """
+
+    resultReady = pyqtSignal(int)  # total indexed record count; 0 = not elevated
+
+    def __init__(self, engine: FastSearchEngine, parent=None):
+        super().__init__(parent)
+        self._engine = engine
+
+    def run(self) -> None:
+        self.resultReady.emit(self._engine.build_index())
 
 
 class _TrashDeleteWorker(QThread):
@@ -237,21 +234,20 @@ class _BatchForceDeleteWorker(QThread):
         self.resultReady.emit(results)
 
 
-class _FallbackSearchView(QWidget):
-    """Today's original from-scratch Python search - unchanged except for
-    the admin-restart banner added at the top. See the module docstring
-    for why this stays instead of being replaced by the embedded view.
+class SearchPage(QWidget):
+    """See the module docstring. Same class name/constructor signature as
+    before the fast-engine merge, so nothing outside this file needed to
+    change to keep using it.
     """
-
-    restartAsAdminRequested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._index: List[FileEntry] = []
+        self._index: List[FileEntry] = []  # only populated/used by the slow backend
         self._by_path: Dict[str, FileEntry] = {}
         self._worker: Optional[QThread] = None  # one at a time, mirrors CleanupPage
         self._auto_indexed = False  # first showEvent kicks off indexing, not __init__
         self._active_category = "all"
+        self._fast_engine: Optional[FastSearchEngine] = self._create_fast_engine()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -266,7 +262,8 @@ class _FallbackSearchView(QWidget):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(16)
 
-        root.addWidget(self._build_admin_banner())
+        if self._fast_engine is None:
+            root.addWidget(self._build_admin_banner())
         root.addWidget(self._build_index_section())
         root.addWidget(self._build_search_section(), 1)
 
@@ -274,6 +271,33 @@ class _FallbackSearchView(QWidget):
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(_SEARCH_DEBOUNCE_MS)
         self._search_timer.timeout.connect(self._apply_search)
+
+        # Required, not optional: the fast engine can own live USN-watcher
+        # threads (and an unsaved index) running inside this process.
+        # MainWindow.shutdown() is only ever called by the offscreen smoke
+        # check, not a real run - a real app exit goes through the tray's
+        # quit action calling QApplication.quit() directly, which fires
+        # aboutToQuit. Without connecting to it here, every ordinary quit
+        # would skip EC_SaveIndexes (full MFT rescan next launch) and leak
+        # the DLL's background threads.
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.stop)
+
+    @staticmethod
+    def _create_fast_engine() -> Optional[FastSearchEngine]:
+        """None whenever the fast backend can't be used - not elevated,
+        EverythingCore.dll missing (any dev/test environment, or an install
+        that predates it), or present but failed to load for some other
+        reason. Callers treat None as "use the slow os.walk backend
+        instead", exactly like today's not-elevated case already works.
+        """
+        if not is_running_as_admin() or not fast_search_available():
+            return None
+        try:
+            return FastSearchEngine()
+        except OSError:
+            return None
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -288,13 +312,13 @@ class _FallbackSearchView(QWidget):
         frame.setProperty("role", "card")
         layout = QHBoxLayout(frame)
         label = QLabel(
-            "빠른 검색(EverythingClone)을 쓰려면 관리자 권한이 필요합니다. 지금은 느린 기본 검색을 사용 중입니다."
+            "빠른 검색(EverythingClone 엔진)을 쓰려면 관리자 권한이 필요합니다. 지금은 느린 기본 검색을 사용 중입니다."
         )
         label.setWordWrap(True)
         layout.addWidget(label, 1)
         restart_btn = QPushButton("관리자 권한으로 다시 시작")
         restart_btn.setProperty("role", "primary")
-        restart_btn.clicked.connect(self.restartAsAdminRequested.emit)
+        restart_btn.clicked.connect(self._on_restart_as_admin)
         layout.addWidget(restart_btn)
         return frame
 
@@ -318,7 +342,7 @@ class _FallbackSearchView(QWidget):
 
     def _build_category_combo(self) -> QComboBox:
         combo = QComboBox()
-        combo.setEnabled(False)  # matches self._search_box - enabled together in _on_index_ready
+        combo.setEnabled(False)  # matches self._search_box - enabled together once indexed
         for category, label in _CATEGORY_OPTIONS:
             combo.addItem(label, category)
         combo.setCurrentIndex(0)  # 전체 selected by default
@@ -388,6 +412,20 @@ class _FallbackSearchView(QWidget):
     # -- indexing ---------------------------------------------------------
 
     def _start_indexing(self) -> None:
+        if self._fast_engine is not None:
+            self._reindex_btn.setEnabled(False)
+            self._search_box.setEnabled(False)
+            self._category_combo.setEnabled(False)
+            self._results_table.setRowCount(0)
+            self._index_status_label.setText("인덱싱 중...")
+
+            worker = _FastIndexWorker(self._fast_engine, self)
+            worker.resultReady.connect(self._on_fast_index_ready)
+            worker.finished.connect(worker.deleteLater)
+            self._worker = worker
+            worker.start()
+            return
+
         roots = _fixed_drive_roots()
         if not roots:
             QMessageBox.warning(self, "드라이브 없음", "검색 가능한 드라이브를 찾지 못했습니다.")
@@ -421,23 +459,55 @@ class _FallbackSearchView(QWidget):
         self._category_combo.setEnabled(True)
         self._apply_search()
 
+    def _on_fast_index_ready(self, count: int) -> None:
+        self._reindex_btn.setEnabled(True)
+        if count == 0:
+            self._index_status_label.setText("인덱싱 실패 - 관리자 권한이 필요할 수 있습니다")
+            return
+        self._index_status_label.setText(f"{count}개 항목 인덱싱됨")
+        self._search_box.setEnabled(True)
+        self._search_box.setPlaceholderText("검색어 입력...")
+        self._category_combo.setEnabled(True)
+        self._apply_search()
+
     # -- search -------------------------------------------------------------
 
     def _on_search_text_changed(self, _text: str) -> None:
         self._search_timer.start()
 
     def _apply_search(self) -> None:
+        if self._fast_engine is not None:
+            # Category filtering already happened inside the engine
+            # (src/query.cpp's MatchesCategory, via EC_Search's category
+            # argument) - unlike the slow backend below, no separate
+            # matches_category pass is needed here.
+            results = self._fast_engine.search(
+                self._search_box.text(), self._active_category, _MAX_DISPLAYED_RESULTS
+            )
+            # "X / Y개 표시" (shown / total indexed) rather than the slow
+            # backend's "shown out of N matches" - matches EverythingClone's
+            # own status text convention (main.cpp), since this engine has
+            # no cheap way to report a true match count once maxResults
+            # truncates the scan (see src/ntfs_index.cpp's Search).
+            status = f"{len(results)} / {self._fast_engine.total_count()}개 표시"
+            self._render_results(results, status)
+            return
+
         results = search_entries(self._index, self._search_box.text()) if self._index else []
         if self._active_category != "all":
             results = [e for e in results if matches_category(e, self._active_category)]
-        self._populate_results(results)
-
-    def _populate_results(self, results: List[FileEntry]) -> None:
         total = len(results)
         capped = results[:_MAX_DISPLAYED_RESULTS]
+        if total > _MAX_DISPLAYED_RESULTS:
+            status = f"{_MAX_DISPLAYED_RESULTS}개 표시 중 (전체 {total}개 일치)"
+        else:
+            status = f"{total}개 일치"
+        self._render_results(capped, status)
+
+    def _render_results(self, results: List[FileEntry], status_text: str) -> None:
         table = self._results_table
-        table.setRowCount(len(capped))
-        for row, entry in enumerate(capped):
+        table.setRowCount(len(results))
+        for row, entry in enumerate(results):
             name_item = QTableWidgetItem(entry.name)
             name_item.setData(Qt.UserRole, entry.path)
             pixmap = get_icon_for_path(entry.path, entry.is_dir)
@@ -448,11 +518,11 @@ class _FallbackSearchView(QWidget):
             size_text = "-" if entry.is_dir else format_bytes(entry.size_bytes)
             table.setItem(row, _COL_SIZE, QTableWidgetItem(size_text))
             table.setItem(row, _COL_MODIFIED, QTableWidgetItem(format_datetime_kr(entry.modified_at)))
-
-        if total > _MAX_DISPLAYED_RESULTS:
-            self._results_status_label.setText(f"{_MAX_DISPLAYED_RESULTS}개 표시 중 (전체 {total}개 일치)")
-        else:
-            self._results_status_label.setText(f"{total}개 일치")
+        self._results_status_label.setText(status_text)
+        # Keyed off exactly what's on screen right now, not the whole index
+        # - _selected_entries below only ever needs to resolve a currently
+        # selected (so currently displayed) row's path back to a FileEntry.
+        self._by_path = {e.path: e for e in results}
 
     def _selected_entries(self) -> List[FileEntry]:
         rows = {idx.row() for idx in self._results_table.selectedIndexes()}
@@ -620,221 +690,40 @@ class _FallbackSearchView(QWidget):
     # -- shared helpers -------------------------------------------------
 
     def _remove_deleted_paths(self, paths) -> None:
-        """Purges successfully-deleted paths from the in-memory index (not
-        just the visible results table) so a later search doesn't resurface
-        something that no longer exists. A deleted directory's whole
-        subtree needs purging too, hence the prefix check - not just an
-        exact-path match. The trailing separator on each prefix is what
-        stops "Downloads" from matching "Downloads2" (same boundary bug
+        """Removes successfully-deleted paths (and, for a deleted
+        directory, everything currently displayed under it) directly from
+        the results table and self._by_path, rather than re-running a
+        search - correct for both backends without depending on either
+        one's index having caught up with the delete first. That matters
+        more for the fast backend than it used to for the slow one alone:
+        its index only updates once the live USN watcher processes the
+        change, which isn't necessarily instant, so an immediate re-search
+        right after a delete could still briefly show the just-deleted
+        file. The trailing separator on each prefix is what stops
+        "Downloads" from matching "Downloads2" (same boundary bug
         path_guard.py's is_within_or_equal fixes, applied here just for
-        index-list hygiene rather than a safety check).
+        display hygiene rather than a safety check).
         """
         if not paths:
             return
         prefixes = tuple(os.path.join(p, "") for p in paths)
-        self._index = [e for e in self._index if e.path not in paths and not e.path.startswith(prefixes)]
-        self._by_path = {e.path: e for e in self._index}
-        self._apply_search()
+
+        def is_deleted(path: str) -> bool:
+            return path in paths or path.startswith(prefixes)
+
+        table = self._results_table
+        for row in range(table.rowCount() - 1, -1, -1):
+            item = table.item(row, _COL_NAME)
+            if item is not None and is_deleted(item.data(Qt.UserRole)):
+                table.removeRow(row)
+
+        self._by_path = {p: e for p, e in self._by_path.items() if not is_deleted(p)}
+        if self._fast_engine is None:
+            self._index = [e for e in self._index if not is_deleted(e.path)]
 
     def _set_busy(self, busy: bool) -> None:
         self._reindex_btn.setEnabled(not busy)
         self._results_table.setEnabled(not busy)
-
-    def stop(self) -> None:
-        """Cancels and waits for any in-flight worker before the app can
-        safely close - same reasoning as CleanupPage.stop() (destroying a
-        live QThread is undefined behavior in Qt). Matters even more here
-        than most pages: a whole-drive index is the single largest, longest
-        background job in this app, so a user closing the app mid-index is
-        an expected, not edge-case, path through this method.
-
-        The RuntimeError guard covers a real, confirmed-reachable case: a
-        worker that already finished (every worker here connects
-        finished -> deleteLater) has its underlying Qt object destroyed the
-        next time the event loop runs - which, in a long-running real app,
-        has near-certainly already happened by the time the user gets
-        around to closing it. self._worker is then a dangling wrapper
-        around a deleted object; touching it (getattr included - sip
-        raises RuntimeError, not AttributeError, so getattr's own default
-        doesn't catch it) raises instead of behaving like None. There's
-        nothing to cancel or wait for in that case anyway, so treating it
-        as a no-op is correct, not just a workaround.
-        """
-        if self._worker is None:
-            return
-        try:
-            cancel = getattr(self._worker, "cancel", None)
-            if callable(cancel):
-                cancel()
-            self._worker.wait(10000)
-        except RuntimeError:
-            pass
-
-
-class _EmbeddedSearchView(QWidget):
-    """Hosts EverythingClone.exe's own window as a real child window. Only
-    ever shown (and so only ever launches anything) when this process is
-    already elevated - see the module docstring and SearchPage below.
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._process: Optional[subprocess.Popen] = None
-        self._child_hwnd: Optional[int] = None
-        self._launch_attempted = False  # first showEvent launches, not __init__
-        self._poll_elapsed_ms = 0
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        self._status_label = QLabel("빠른 검색을 준비하는 중...")
-        self._status_label.setAlignment(Qt.AlignCenter)
-        self._status_label.setWordWrap(True)
-        self._status_label.setStyleSheet("color: #8c92a4; padding: 24px;")
-        layout.addWidget(self._status_label)
-
-        # The container that EverythingClone.exe's window gets parented
-        # into. WA_NativeWindow forces Qt to back it with a real native
-        # window (HWND on Windows) up front, rather than potentially
-        # deferring that - winId() below needs a real, stable handle.
-        self._container = QWidget(self)
-        self._container.setAttribute(Qt.WA_NativeWindow, True)
-        layout.addWidget(self._container, 1)
-
-        self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(_EMBED_POLL_INTERVAL_MS)
-        self._poll_timer.timeout.connect(self._poll_for_child)
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        if not self._launch_attempted:
-            self._launch_attempted = True
-            # Deferred a tick so the container has had a layout pass and
-            # width()/height() reflect its real, settled size - matches
-            # _FallbackSearchView._update_preview's identical reasoning for
-            # a widget's size right after its very first show.
-            QTimer.singleShot(0, self._launch)
-
-    # -- launch + discovery -------------------------------------------------
-
-    def _launch(self) -> None:
-        exe_path = resource_path("EverythingClone.exe")
-        if not os.path.exists(exe_path):
-            self._show_error(f"EverythingClone.exe를 찾을 수 없습니다:\n{exe_path}")
-            return
-
-        width = max(self._container.width(), _EMBED_MIN_WIDTH)
-        height = max(self._container.height(), _EMBED_MIN_HEIGHT)
-        parent_hwnd = int(self._container.winId())
-        args = build_launch_args(exe_path, parent_hwnd, width, height)
-        try:
-            self._process = subprocess.Popen(args)
-        except OSError as e:
-            self._show_error(f"EverythingClone.exe를 실행하지 못했습니다:\n{e}")
-            return
-
-        self._poll_elapsed_ms = 0
-        self._poll_timer.start()
-
-    def _poll_for_child(self) -> None:
-        if self._process is not None and self._process.poll() is not None:
-            self._poll_timer.stop()
-            self._show_error("EverythingClone.exe가 예기치 않게 종료되었습니다.")
-            return
-
-        hwnd = find_child_hwnd(int(self._container.winId()))
-        if hwnd is not None:
-            self._poll_timer.stop()
-            self._child_hwnd = hwnd
-            self._status_label.setVisible(False)
-            resize_child(hwnd, self._container.width(), self._container.height())
-            return
-
-        self._poll_elapsed_ms += _EMBED_POLL_INTERVAL_MS
-        if self._poll_elapsed_ms >= _EMBED_POLL_BUDGET_MS:
-            self._poll_timer.stop()
-            self._show_error("빠른 검색 창을 여는 데 시간이 너무 오래 걸립니다.")
-
-    def _show_error(self, message: str) -> None:
-        self._status_label.setText(message)
-        self._status_label.setVisible(True)
-
-    # -- resize forwarding ----------------------------------------------
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        if self._child_hwnd is not None:
-            resize_child(self._child_hwnd, self._container.width(), self._container.height())
-
-    # -- teardown -------------------------------------------------------
-
-    def _terminate_process(self) -> None:
-        if self._process is None:
-            return
-        self._process.terminate()
-        try:
-            self._process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            self._process.kill()
-
-    def stop(self) -> None:
-        """Closes the embedded EverythingClone process, if one was ever
-        launched. Prefers a graceful WM_CLOSE (request_graceful_close) over
-        a hard terminate()/kill() whenever a child window was actually
-        discovered - see core/everything_embed.py's request_graceful_close
-        docstring for why a hard kill would regress "fast restart from a
-        saved index snapshot" into "full MFT rescan every launch".
-        """
-        if self._process is None:
-            return
-        self._poll_timer.stop()
-        if self._child_hwnd is not None:
-            request_graceful_close(self._child_hwnd)
-            try:
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._terminate_process()
-        else:
-            self._terminate_process()
-        self._process = None
-        self._child_hwnd = None
-
-
-class SearchPage(QWidget):
-    """Thin coordinator: picks _EmbeddedSearchView or _FallbackSearchView
-    once, based on this process's elevation, and stays out of the way -
-    same class name/constructor signature as before this split, so nothing
-    outside this file needed to change to keep using it.
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self._stack = QStackedWidget(self)
-        layout.addWidget(self._stack)
-
-        self._fallback_view = _FallbackSearchView(self)
-        self._fallback_view.restartAsAdminRequested.connect(self._on_restart_as_admin)
-        fallback_index = self._stack.addWidget(self._fallback_view)
-
-        self._embedded_view = _EmbeddedSearchView(self)
-        embedded_index = self._stack.addWidget(self._embedded_view)
-
-        self._stack.setCurrentIndex(embedded_index if is_running_as_admin() else fallback_index)
-
-        # Required, not optional: the embedded view can own a running,
-        # *admin-elevated* child process. MainWindow.shutdown() is only
-        # ever called by the offscreen smoke check, not a real run (see its
-        # own docstring) - a real app exit goes through the tray's quit
-        # action calling QApplication.quit() directly, which fires
-        # aboutToQuit. Without connecting to it here, every ordinary quit
-        # would leak that process in the background.
-        app = QApplication.instance()
-        if app is not None:
-            app.aboutToQuit.connect(self.stop)
 
     def _on_restart_as_admin(self) -> None:
         if request_admin_restart(extra_args=["--start-page", "search"]):
@@ -849,8 +738,48 @@ class SearchPage(QWidget):
             )
 
     def stop(self) -> None:
-        self._fallback_view.stop()
-        self._embedded_view.stop()
+        """Cancels/waits for any in-flight worker, then closes the fast
+        engine if one was created - same reasoning as before this class
+        ever touched a DLL (destroying a live QThread is undefined
+        behavior in Qt) for the worker half, but closing the fast engine
+        adds a sharper failure mode than a merely-orphaned QThread: closing
+        it while a _FastIndexWorker's EC_BuildIndex call is *still running*
+        on another thread would free state that call is still touching - a
+        real C++ use-after-free, not just Python/Qt object churn. So the
+        fast engine is only closed once the worker is confirmed stopped
+        (wait() returned True) or already gone (the RuntimeError case
+        below - see its own comment). If wait() times out, the fast engine
+        (and its background USN-watcher threads) is deliberately left to
+        leak for the rest of this process's life rather than risk that -
+        safe, since this only ever runs from aboutToQuit, i.e. the process
+        is exiting anyway.
+
+        The RuntimeError guard covers a real, confirmed-reachable case: a
+        worker that already finished (every worker here connects
+        finished -> deleteLater) has its underlying Qt object destroyed the
+        next time the event loop runs - which, in a long-running real app,
+        has near-certainly already happened by the time the user gets
+        around to closing it. self._worker is then a dangling wrapper
+        around a deleted object; touching it (getattr included - sip
+        raises RuntimeError, not AttributeError, so getattr's own default
+        doesn't catch it) raises instead of behaving like None. There's
+        nothing to cancel or wait for in that case - the worker (and
+        whatever EC_BuildIndex call it may have been running) has
+        definitely already finished, so it's safe to close the fast engine.
+        """
+        worker_confirmed_stopped = True
+        if self._worker is not None:
+            try:
+                cancel = getattr(self._worker, "cancel", None)
+                if callable(cancel):
+                    cancel()
+                worker_confirmed_stopped = self._worker.wait(10000)
+            except RuntimeError:
+                pass
+
+        if self._fast_engine is not None and worker_confirmed_stopped:
+            self._fast_engine.save_indexes()
+            self._fast_engine.close()
 
 
 def _open_path(path: str) -> None:

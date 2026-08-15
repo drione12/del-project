@@ -5,6 +5,7 @@ CMakeFiles/
 CMakeCache.txt
 *.obj
 *.exe
+*.dll
 *.pdb
 *.ilk
 
