@@ -571,6 +571,110 @@ void ActionProperties(HWND hwnd, const std::wstring& path) {
     ShellExecuteExW(&sei);
 }
 
+// QueryContextMenu/InvokeCommand below receive command IDs relative to
+// kShellCmdFirst - the shell (and whatever third-party context-menu
+// handlers are registered on the machine this actually runs on, e.g. an
+// archiver or antivirus extension) assigns IDs within
+// [kShellCmdFirst, kShellCmdLast], so that range can't overlap this app's
+// own IDM_* values (resource.h). kForceDeleteCmdId sits just past the end
+// of it instead of among the IDM_* constants so a single range check in
+// TryShowNativeContextMenu tells native shell commands apart from this
+// app's own appended item.
+constexpr UINT kShellCmdFirst = 1;
+constexpr UINT kShellCmdLast = 0x7000;
+constexpr UINT kForceDeleteCmdId = kShellCmdLast + 1;
+
+// Real Explorer-style context menu, built by asking the shell itself for
+// the menu it would show for these paths (IContextMenu) instead of hand-
+// listing items this app happens to know about - the only way to include
+// whatever third-party context-menu handlers are registered on the
+// machine this runs on. Requires every path to share one parent folder,
+// the same restriction real Explorer itself has for a unified multi-select
+// menu, so the caller is expected to have already checked that and to fall
+// back to a hand-built menu otherwise. Returns false (nothing shown) if
+// the shell can't supply a context menu for this selection, so the caller
+// can fall back too.
+bool TryShowNativeContextMenu(HWND hwnd, const std::vector<std::wstring>& paths, POINT pt) {
+    if (paths.empty()) return false;
+
+    LPITEMIDLIST firstPidl = nullptr;
+    if (FAILED(SHParseDisplayName(paths[0].c_str(), nullptr, &firstPidl, 0, nullptr)) ||
+        firstPidl == nullptr) {
+        return false;
+    }
+
+    IShellFolder* parentFolder = nullptr;
+    LPCITEMIDLIST firstChildPidl = nullptr;
+    if (FAILED(SHBindToParent(firstPidl, IID_IShellFolder, reinterpret_cast<void**>(&parentFolder),
+                               &firstChildPidl))) {
+        CoTaskMemFree(firstPidl);
+        return false;
+    }
+
+    // firstChildPidl (and every other ILFindLastID result below) points
+    // *into* its own absolute PIDL's memory - only the absolute PIDLs
+    // collected in itemPidls are separately allocated and need
+    // CoTaskMemFree.
+    std::vector<LPITEMIDLIST> itemPidls{firstPidl};
+    std::vector<LPCITEMIDLIST> childPidls{firstChildPidl};
+    for (size_t i = 1; i < paths.size(); i++) {
+        LPITEMIDLIST itemPidl = nullptr;
+        if (FAILED(SHParseDisplayName(paths[i].c_str(), nullptr, &itemPidl, 0, nullptr)) ||
+            itemPidl == nullptr) {
+            continue;
+        }
+        itemPidls.push_back(itemPidl);
+        childPidls.push_back(ILFindLastID(itemPidl));
+    }
+
+    IContextMenu* contextMenu = nullptr;
+    HRESULT hr =
+        parentFolder->GetUIObjectOf(hwnd, static_cast<UINT>(childPidls.size()), childPidls.data(),
+                                     IID_IContextMenu, nullptr, reinterpret_cast<void**>(&contextMenu));
+    if (FAILED(hr)) {
+        for (auto* p : itemPidls) CoTaskMemFree(p);
+        parentFolder->Release();
+        return false;
+    }
+
+    HMENU menu = CreatePopupMenu();
+    hr = contextMenu->QueryContextMenu(menu, 0, kShellCmdFirst, kShellCmdLast, CMF_NORMAL);
+    if (FAILED(hr)) {
+        DestroyMenu(menu);
+        contextMenu->Release();
+        for (auto* p : itemPidls) CoTaskMemFree(p);
+        parentFolder->Release();
+        return false;
+    }
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kForceDeleteCmdId, L"강제 삭제");
+
+    // SetForegroundWindow + the WM_NULL nudge afterward is the documented fix for
+    // the popup not dismissing correctly when the user clicks outside it.
+    SetForegroundWindow(hwnd);
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+    PostMessage(hwnd, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+
+    if (cmd == static_cast<int>(kForceDeleteCmdId)) {
+        ActionForceDelete(hwnd, paths);
+    } else if (cmd >= static_cast<int>(kShellCmdFirst) && cmd <= static_cast<int>(kShellCmdLast)) {
+        CMINVOKECOMMANDINFO ici{};
+        ici.cbSize = sizeof(ici);
+        ici.hwnd = hwnd;
+        ici.lpVerb = MAKEINTRESOURCEA(cmd - kShellCmdFirst);
+        ici.nShow = SW_SHOWNORMAL;
+        contextMenu->InvokeCommand(&ici);
+        RunSearch();
+    }
+
+    contextMenu->Release();
+    for (auto* p : itemPidls) CoTaskMemFree(p);
+    parentFolder->Release();
+    return true;
+}
+
 // Resizes+centers the main window on its monitor's work area. Restores
 // first if maximized, since SetWindowPos on a zoomed window is a no-op.
 void ApplyWindowSizePreset(HWND hwnd, int width, int height) {
@@ -1203,9 +1307,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CONTEXTMENU: {
             if (reinterpret_cast<HWND>(wParam) != g_resultsView) break;
 
-            int selected = ListView_GetNextItem(g_resultsView, -1, LVNI_SELECTED);
-            if (selected < 0 || static_cast<size_t>(selected) >= g_results.size()) return 0;
-            const std::wstring path = g_results[selected].path;
+            std::vector<std::wstring> paths;
+            GetSelectedResults(paths);
+            if (paths.empty()) return 0;
 
             int x = static_cast<int>(static_cast<short>(LOWORD(lParam)));
             int y = static_cast<int>(static_cast<short>(HIWORD(lParam)));
@@ -1216,12 +1320,40 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 y = pt.y;
             }
 
+            // A single native menu only makes sense - and is the only case
+            // real Explorer itself supports for a unified menu - when every
+            // selected item shares one parent folder, since
+            // TryShowNativeContextMenu binds all the child PIDLs against a
+            // single IShellFolder.
+            bool sameParent = true;
+            {
+                std::wstring firstName, firstDir;
+                SplitNameAndDir(paths[0], firstName, firstDir);
+                for (size_t i = 1; i < paths.size(); i++) {
+                    std::wstring name, dir;
+                    SplitNameAndDir(paths[i], name, dir);
+                    if (dir != firstDir) {
+                        sameParent = false;
+                        break;
+                    }
+                }
+            }
+
+            if (sameParent && TryShowNativeContextMenu(hwnd, paths, POINT{x, y})) {
+                return 0;
+            }
+
+            // Fallback: either the selection spans multiple parent folders
+            // (real Explorer can't build one native menu for that case
+            // either), or the native attempt above failed for some other
+            // reason (e.g. no IContextMenu registered for these items).
             HMENU menu = CreatePopupMenu();
             AppendMenuW(menu, MF_STRING, 1, L"열기");
             AppendMenuW(menu, MF_STRING, 2, L"포함 폴더 열기");
             AppendMenuW(menu, MF_STRING, 3, L"경로 복사");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(menu, MF_STRING, 4, L"삭제");
+            AppendMenuW(menu, MF_STRING, 6, L"강제 삭제");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(menu, MF_STRING, 5, L"속성");
 
@@ -1234,19 +1366,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             switch (cmd) {
                 case 1:
-                    ActionOpen(path);
+                    for (auto& p : paths) ActionOpen(p);
                     break;
                 case 2:
-                    ActionOpenContainingFolder(path);
+                    ActionOpenContainingFolder(paths[0]);
                     break;
                 case 3:
-                    CopyTextToClipboard(hwnd, path);
+                    CopyTextToClipboard(hwnd, paths[0]);
                     break;
                 case 4:
-                    ActionDelete(hwnd, {path});
+                    ActionDelete(hwnd, paths);
                     break;
                 case 5:
-                    ActionProperties(hwnd, path);
+                    ActionProperties(hwnd, paths[0]);
+                    break;
+                case 6:
+                    ActionForceDelete(hwnd, paths);
                     break;
             }
             return 0;
