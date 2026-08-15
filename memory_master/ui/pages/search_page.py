@@ -1,16 +1,35 @@
-"""File search page ("파일 검색") - an Everything-style search: every fixed
-drive is indexed automatically (core/file_search.py's build_index walks
-them via plain os.walk, not a raw NTFS MFT index like the real Everything
-app or this repo's separate C++ EverythingClone - the two apps share no
-code, see memory_master/README.md), then the in-memory index is searched
-instantly as you type. Results support shift/ctrl multi-select, Del to
-move selected items to the Recycle Bin, a right-click menu adding a
-force-delete option that reuses the same hardened core/force_delete.py
-pipeline as the Cleanup page's drop zone (single selection reuses that
-exact analyze/confirm/execute flow, multi-selection uses a batch flow with
-one confirmation and no kill-list, mirroring
-ui/dialogs/duplicate_image_manager.py's existing batch-delete precedent),
-and a live preview panel for the selected image.
+"""File search page ("파일 검색"). Two views behind one coordinator,
+switched once at construction based on whether this process is elevated:
+
+  _EmbeddedSearchView - shown when running as administrator. Launches
+  EverythingClone.exe (src/, this repo's separate C++/Win32 Everything
+  clone - raw NTFS MFT index + live USN journal watching) with the
+  --embed-parent-hwnd flag added for exactly this purpose, and hosts its
+  window as a real WS_CHILD window inside this page via core/
+  everything_embed.py's ctypes helpers - not a second separate window.
+  EverythingClone itself requires admin rights (raw volume handles), and
+  Windows blocks/degrades window-parenting across different integrity
+  levels (UIPI), which is why this whole page is elevation-gated rather
+  than just launching the child unconditionally.
+
+  _FallbackSearchView - shown otherwise: today's original from-scratch
+  Python search (core/file_search.py's build_index walks every fixed
+  drive via plain os.walk, then the in-memory index is searched instantly
+  as you type - no raw MFT index, no persistence, no live updates; see
+  memory_master/README.md), plus a banner offering to restart the whole
+  app elevated (core/elevation.py's request_admin_restart, generalized
+  from its original force-delete-only use so the relaunched instance can
+  pass --start-page search and land right back here). Never removed: the
+  Search page should never be a dead "you need admin" screen with nothing
+  usable, and this is already-working, already-tested code.
+
+Delete/force-delete on the fallback view reuses the same hardened
+core/force_delete.py pipeline as the Cleanup page's drop zone (single
+selection reuses that exact analyze/confirm/execute flow, multi-selection
+uses a batch flow with one confirmation and no kill-list, mirroring
+ui/dialogs/duplicate_image_manager.py's existing batch-delete precedent);
+the embedded view's own force-delete (EverythingClone's native context
+menu) is a separate, independent implementation on the C++ side.
 """
 from __future__ import annotations
 
@@ -24,6 +43,7 @@ from PyQt5.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -34,17 +54,20 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from core.elevation import is_running_as_admin, request_admin_restart
 from core.file_search import FileEntry, build_index
 from core.file_search import search as search_entries
 from core.force_delete import AnalyzeResult, ExecuteOptions, ExecuteResult, execute
 from core.formatting import format_bytes, format_datetime_kr
 from core.image_scanner import is_image_file
+from core.resource_path import resource_path
 from core.trash import send_to_trash
 from core.workers import AnalyzeWorker, ExecuteWorker
 from ui.dialogs.confirm_force_delete import ConfirmForceDeleteDialog
@@ -53,6 +76,21 @@ if sys.platform == "win32":
     from core.icons import get_icon_for_path
 else:
     def get_icon_for_path(path: str, is_dir: bool = False):
+        return None
+
+if sys.platform == "win32":
+    from core.everything_embed import build_launch_args, find_child_hwnd, request_graceful_close, resize_child
+else:
+    def build_launch_args(exe_path: str, parent_hwnd: int, width: int, height: int) -> List[str]:
+        return []
+
+    def find_child_hwnd(parent_hwnd: int) -> Optional[int]:
+        return None
+
+    def resize_child(child_hwnd: int, width: int, height: int) -> None:
+        return None
+
+    def request_graceful_close(child_hwnd: int) -> None:
         return None
 
 _COL_NAME = 0
@@ -70,6 +108,11 @@ _BATCH_FORCE_DELETE_OPTIONS = ExecuteOptions(
     secure_shred=False,
     reboot_delete_fallback=True,
 )
+
+_EMBED_POLL_INTERVAL_MS = 100
+_EMBED_POLL_BUDGET_MS = 10000
+_EMBED_MIN_WIDTH = 200
+_EMBED_MIN_HEIGHT = 150
 
 
 def _fixed_drive_roots() -> List[str]:
@@ -169,7 +212,14 @@ class _BatchForceDeleteWorker(QThread):
         self.resultReady.emit(results)
 
 
-class SearchPage(QWidget):
+class _FallbackSearchView(QWidget):
+    """Today's original from-scratch Python search - unchanged except for
+    the admin-restart banner added at the top. See the module docstring
+    for why this stays instead of being replaced by the embedded view.
+    """
+
+    restartAsAdminRequested = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._index: List[FileEntry] = []
@@ -190,6 +240,7 @@ class SearchPage(QWidget):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(16)
 
+        root.addWidget(self._build_admin_banner())
         root.addWidget(self._build_index_section())
         root.addWidget(self._build_search_section(), 1)
 
@@ -205,6 +256,21 @@ class SearchPage(QWidget):
             self._start_indexing()
 
     # -- construction -------------------------------------------------------
+
+    def _build_admin_banner(self) -> QFrame:
+        frame = QFrame()
+        frame.setProperty("role", "card")
+        layout = QHBoxLayout(frame)
+        label = QLabel(
+            "빠른 검색(EverythingClone)을 쓰려면 관리자 권한이 필요합니다. 지금은 느린 기본 검색을 사용 중입니다."
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label, 1)
+        restart_btn = QPushButton("관리자 권한으로 다시 시작")
+        restart_btn.setProperty("role", "primary")
+        restart_btn.clicked.connect(self.restartAsAdminRequested.emit)
+        layout.addWidget(restart_btn)
+        return frame
 
     def _build_index_section(self) -> QFrame:
         frame = QFrame()
@@ -555,6 +621,188 @@ class SearchPage(QWidget):
             self._worker.wait(10000)
         except RuntimeError:
             pass
+
+
+class _EmbeddedSearchView(QWidget):
+    """Hosts EverythingClone.exe's own window as a real child window. Only
+    ever shown (and so only ever launches anything) when this process is
+    already elevated - see the module docstring and SearchPage below.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._process: Optional[subprocess.Popen] = None
+        self._child_hwnd: Optional[int] = None
+        self._launch_attempted = False  # first showEvent launches, not __init__
+        self._poll_elapsed_ms = 0
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._status_label = QLabel("빠른 검색을 준비하는 중...")
+        self._status_label.setAlignment(Qt.AlignCenter)
+        self._status_label.setWordWrap(True)
+        self._status_label.setStyleSheet("color: #8c92a4; padding: 24px;")
+        layout.addWidget(self._status_label)
+
+        # The container that EverythingClone.exe's window gets parented
+        # into. WA_NativeWindow forces Qt to back it with a real native
+        # window (HWND on Windows) up front, rather than potentially
+        # deferring that - winId() below needs a real, stable handle.
+        self._container = QWidget(self)
+        self._container.setAttribute(Qt.WA_NativeWindow, True)
+        layout.addWidget(self._container, 1)
+
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(_EMBED_POLL_INTERVAL_MS)
+        self._poll_timer.timeout.connect(self._poll_for_child)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._launch_attempted:
+            self._launch_attempted = True
+            # Deferred a tick so the container has had a layout pass and
+            # width()/height() reflect its real, settled size - matches
+            # _FallbackSearchView._update_preview's identical reasoning for
+            # a widget's size right after its very first show.
+            QTimer.singleShot(0, self._launch)
+
+    # -- launch + discovery -------------------------------------------------
+
+    def _launch(self) -> None:
+        exe_path = resource_path("EverythingClone.exe")
+        if not os.path.exists(exe_path):
+            self._show_error(f"EverythingClone.exe를 찾을 수 없습니다:\n{exe_path}")
+            return
+
+        width = max(self._container.width(), _EMBED_MIN_WIDTH)
+        height = max(self._container.height(), _EMBED_MIN_HEIGHT)
+        parent_hwnd = int(self._container.winId())
+        args = build_launch_args(exe_path, parent_hwnd, width, height)
+        try:
+            self._process = subprocess.Popen(args)
+        except OSError as e:
+            self._show_error(f"EverythingClone.exe를 실행하지 못했습니다:\n{e}")
+            return
+
+        self._poll_elapsed_ms = 0
+        self._poll_timer.start()
+
+    def _poll_for_child(self) -> None:
+        if self._process is not None and self._process.poll() is not None:
+            self._poll_timer.stop()
+            self._show_error("EverythingClone.exe가 예기치 않게 종료되었습니다.")
+            return
+
+        hwnd = find_child_hwnd(int(self._container.winId()))
+        if hwnd is not None:
+            self._poll_timer.stop()
+            self._child_hwnd = hwnd
+            self._status_label.setVisible(False)
+            resize_child(hwnd, self._container.width(), self._container.height())
+            return
+
+        self._poll_elapsed_ms += _EMBED_POLL_INTERVAL_MS
+        if self._poll_elapsed_ms >= _EMBED_POLL_BUDGET_MS:
+            self._poll_timer.stop()
+            self._show_error("빠른 검색 창을 여는 데 시간이 너무 오래 걸립니다.")
+
+    def _show_error(self, message: str) -> None:
+        self._status_label.setText(message)
+        self._status_label.setVisible(True)
+
+    # -- resize forwarding ----------------------------------------------
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._child_hwnd is not None:
+            resize_child(self._child_hwnd, self._container.width(), self._container.height())
+
+    # -- teardown -------------------------------------------------------
+
+    def _terminate_process(self) -> None:
+        if self._process is None:
+            return
+        self._process.terminate()
+        try:
+            self._process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+
+    def stop(self) -> None:
+        """Closes the embedded EverythingClone process, if one was ever
+        launched. Prefers a graceful WM_CLOSE (request_graceful_close) over
+        a hard terminate()/kill() whenever a child window was actually
+        discovered - see core/everything_embed.py's request_graceful_close
+        docstring for why a hard kill would regress "fast restart from a
+        saved index snapshot" into "full MFT rescan every launch".
+        """
+        if self._process is None:
+            return
+        self._poll_timer.stop()
+        if self._child_hwnd is not None:
+            request_graceful_close(self._child_hwnd)
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._terminate_process()
+        else:
+            self._terminate_process()
+        self._process = None
+        self._child_hwnd = None
+
+
+class SearchPage(QWidget):
+    """Thin coordinator: picks _EmbeddedSearchView or _FallbackSearchView
+    once, based on this process's elevation, and stays out of the way -
+    same class name/constructor signature as before this split, so nothing
+    outside this file needed to change to keep using it.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self._stack = QStackedWidget(self)
+        layout.addWidget(self._stack)
+
+        self._fallback_view = _FallbackSearchView(self)
+        self._fallback_view.restartAsAdminRequested.connect(self._on_restart_as_admin)
+        fallback_index = self._stack.addWidget(self._fallback_view)
+
+        self._embedded_view = _EmbeddedSearchView(self)
+        embedded_index = self._stack.addWidget(self._embedded_view)
+
+        self._stack.setCurrentIndex(embedded_index if is_running_as_admin() else fallback_index)
+
+        # Required, not optional: the embedded view can own a running,
+        # *admin-elevated* child process. MainWindow.shutdown() is only
+        # ever called by the offscreen smoke check, not a real run (see its
+        # own docstring) - a real app exit goes through the tray's quit
+        # action calling QApplication.quit() directly, which fires
+        # aboutToQuit. Without connecting to it here, every ordinary quit
+        # would leak that process in the background.
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.stop)
+
+    def _on_restart_as_admin(self) -> None:
+        if request_admin_restart(extra_args=["--start-page", "search"]):
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+        else:
+            QMessageBox.warning(
+                self,
+                "다시 시작 실패",
+                "관리자 권한으로 다시 시작하지 못했습니다. 직접 관리자 권한으로 실행해 주세요.",
+            )
+
+    def stop(self) -> None:
+        self._fallback_view.stop()
+        self._embedded_view.stop()
 
 
 def _open_path(path: str) -> None:
