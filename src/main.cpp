@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <functional>
@@ -73,6 +74,17 @@ bool g_useRegex = false;
 
 NOTIFYICONDATAW g_trayIcon{};
 HFONT g_resultsFont = nullptr;  // owned; replaced (old one deleted) on each font change
+
+// Embed mode: set from the "--embed-parent-hwnd" command-line flag (see
+// wWinMain) when a host process (Memory Master) wants this window created
+// as a WS_CHILD of its own HWND instead of a standalone top-level window.
+// g_embedParentHwnd != nullptr is what actually flips g_embedMode on; the
+// width/height defaults match the normal standalone window size, used only
+// as a defensive fallback for a malformed/manual embed-mode invocation.
+bool g_embedMode = false;
+HWND g_embedParentHwnd = nullptr;
+int g_embedWidth = 700;
+int g_embedHeight = 560;
 
 // Shows+focuses or hides the main window, shared by tray icon
 // click/double-click and the global show/hide hotkey.
@@ -1091,22 +1103,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             ApplyDisplaySettings(g_resultsView, LoadDisplaySettings());
 
-            g_trayIcon.cbSize = sizeof(g_trayIcon);
-            g_trayIcon.hWnd = hwnd;
-            g_trayIcon.uID = kTrayIconId;
-            g_trayIcon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-            g_trayIcon.uCallbackMessage = kMsgTrayIcon;
-            g_trayIcon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-            wcscpy_s(g_trayIcon.szTip, L"EverythingClone");
-            Shell_NotifyIconW(NIM_ADD, &g_trayIcon);
+            // Tray icon, global hotkey: both are standalone-top-level-window
+            // features that don't make sense for a window embedded inside
+            // another app's own UI - skipped in embed mode. Indexing still
+            // runs unconditionally either way; that's the entire point of
+            // embedding this window in the first place.
+            if (!g_embedMode) {
+                g_trayIcon.cbSize = sizeof(g_trayIcon);
+                g_trayIcon.hWnd = hwnd;
+                g_trayIcon.uID = kTrayIconId;
+                g_trayIcon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+                g_trayIcon.uCallbackMessage = kMsgTrayIcon;
+                g_trayIcon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+                wcscpy_s(g_trayIcon.szTip, L"EverythingClone");
+                Shell_NotifyIconW(NIM_ADD, &g_trayIcon);
 
-            RegisterHotKey(hwnd, kShowHideHotkeyId, MOD_CONTROL | MOD_ALT, VK_SPACE);
+                RegisterHotKey(hwnd, kShowHideHotkeyId, MOD_CONTROL | MOD_ALT, VK_SPACE);
+            }
 
             std::thread(IndexingThread, hwnd).detach();
             return 0;
         }
         case WM_SIZE: {
-            if (wParam == SIZE_MINIMIZED) {
+            if (wParam == SIZE_MINIMIZED && !g_embedMode) {
                 // Minimize-to-tray instead of leaving a taskbar entry - the
                 // window is still there (SW_HIDE, not destroyed), the tray
                 // icon's click handler brings it back.
@@ -1487,8 +1506,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             for (auto& volume : g_volumes) {
                 volume->SaveToFile(GetIndexFilePath(volume->Drive()));
             }
-            UnregisterHotKey(hwnd, kShowHideHotkeyId);
-            Shell_NotifyIconW(NIM_DELETE, &g_trayIcon);
+            if (!g_embedMode) {
+                UnregisterHotKey(hwnd, kShowHideHotkeyId);
+                Shell_NotifyIconW(NIM_DELETE, &g_trayIcon);
+            }
             if (g_resultsFont) DeleteObject(g_resultsFont);
             PostQuitMessage(0);
             return 0;
@@ -1499,19 +1520,50 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }  // namespace
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
+    // Embed-mode command line: "--embed-parent-hwnd <value> [--embed-width
+    // <value>] [--embed-height <value>]" lets a host process (Memory
+    // Master) create this window as a WS_CHILD of its own HWND instead of
+    // a standalone top-level one. Absent entirely in normal/standalone
+    // use, which this leaves unaffected - the wWinMain parameter this
+    // reads from (the raw command line string) was never used before.
+    int embedArgc = 0;
+    LPWSTR* embedArgv = CommandLineToArgvW(GetCommandLineW(), &embedArgc);
+    if (embedArgv) {
+        for (int i = 1; i < embedArgc; i++) {
+            if (wcscmp(embedArgv[i], L"--embed-parent-hwnd") == 0 && i + 1 < embedArgc) {
+                g_embedParentHwnd = reinterpret_cast<HWND>(
+                    static_cast<UINT_PTR>(std::wcstoull(embedArgv[++i], nullptr, 10)));
+            } else if (wcscmp(embedArgv[i], L"--embed-width") == 0 && i + 1 < embedArgc) {
+                g_embedWidth = _wtoi(embedArgv[++i]);
+            } else if (wcscmp(embedArgv[i], L"--embed-height") == 0 && i + 1 < embedArgc) {
+                g_embedHeight = _wtoi(embedArgv[++i]);
+            }
+        }
+        LocalFree(embedArgv);
+    }
+    g_embedMode = (g_embedParentHwnd != nullptr);
+
     // Single instance: a second launch just wakes up the first one instead
     // of starting a second full volume index. The mutex handle is
     // intentionally never closed - it only needs to outlive this process,
-    // and Windows cleans it up on exit.
-    HANDLE singleInstanceMutex = CreateMutexW(nullptr, TRUE, kSingleInstanceMutexName);
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        HWND existing = FindWindowW(kWindowClassName, nullptr);
-        if (existing) {
-            ShowWindow(existing, SW_SHOW);
-            if (IsIconic(existing)) ShowWindow(existing, SW_RESTORE);
-            SetForegroundWindow(existing);
+    // and Windows cleans it up on exit. Skipped in embed mode: the host
+    // process already guarantees at most one embedded child per its own
+    // lifetime, and FindWindowW below only finds top-level windows anyway
+    // - if a standalone instance happened to already be running, this
+    // would foreground *that* unrelated window and return before ever
+    // creating the embedded one, silently breaking embedding.
+    HANDLE singleInstanceMutex = nullptr;
+    if (!g_embedMode) {
+        singleInstanceMutex = CreateMutexW(nullptr, TRUE, kSingleInstanceMutexName);
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            HWND existing = FindWindowW(kWindowClassName, nullptr);
+            if (existing) {
+                ShowWindow(existing, SW_SHOW);
+                if (IsIconic(existing)) ShowWindow(existing, SW_RESTORE);
+                SetForegroundWindow(existing);
+            }
+            return 0;
         }
-        return 0;
     }
 
     // Needed for the Shell IContextMenu/IShellFolder and OLE drag-and-drop
@@ -1530,9 +1582,22 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kWindowClassName, L"EverythingClone", WS_OVERLAPPEDWINDOW,
-                                 CW_USEDEFAULT, CW_USEDEFAULT, 700, 560, nullptr, CreateAppMenu(),
-                                 hInstance, nullptr);
+    HWND hwnd;
+    if (g_embedMode) {
+        // No CreateAppMenu() here: for a WS_CHILD window the CreateWindowExW
+        // hMenu parameter isn't a menu at all, it's repurposed as a
+        // child-window ID - passing a real HMENU there would be a bug, and
+        // a dropdown menu bar doesn't make sense on a window with no frame
+        // of its own anyway. x/y are 0,0 rather than CW_USEDEFAULT, which
+        // MSDN documents as only meaningful for WS_OVERLAPPED windows.
+        hwnd = CreateWindowExW(0, kWindowClassName, L"EverythingClone", WS_CHILD | WS_VISIBLE, 0, 0,
+                                g_embedWidth, g_embedHeight, g_embedParentHwnd, nullptr, hInstance,
+                                nullptr);
+    } else {
+        hwnd = CreateWindowExW(0, kWindowClassName, L"EverythingClone", WS_OVERLAPPEDWINDOW,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 700, 560, nullptr, CreateAppMenu(),
+                                hInstance, nullptr);
+    }
     if (!hwnd) return 1;
 
     ShowWindow(hwnd, nCmdShow);
