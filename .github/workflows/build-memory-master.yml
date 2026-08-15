@@ -36,6 +36,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Built fresh in this job (rather than reused from build.yml's own
+      # artifact) so packaging never depends on a separate, independently
+      # triggered workflow run being fresh/present - see search_page.py's
+      # _EmbeddedSearchView, which needs EverythingClone.exe bundled
+      # alongside MemoryMaster.exe to embed at runtime.
+      - name: Configure EverythingClone
+        run: cmake -B build
+
+      - name: Build EverythingClone
+        run: cmake --build build --config Release
+
+      - name: Bundle EverythingClone.exe into Memory Master resources
+        run: Copy-Item build\Release\EverythingClone.exe memory_master\resources\EverythingClone.exe
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'

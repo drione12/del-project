@@ -22,6 +22,18 @@ def main() -> int:
     window.show()
     app.processEvents()
     print("OK: MainWindow constructed and all pages built without error.")
+
+    # QStackedWidget only delivers a real showEvent to whichever page is
+    # current, so the dashboard-only check above never exercises the
+    # Search page's own showEvent-gated logic. A CI runner process is
+    # never elevated, so this deterministically exercises the "not
+    # elevated -> fallback view" branch for real - the embedded-view
+    # branch stays fundamentally untestable here (no real window manager
+    # under QT_QPA_PLATFORM=offscreen to embed a child window into).
+    window.go_to_page("search")
+    app.processEvents()
+    print("OK: Search page shown (fallback view, since this process isn't elevated).")
+
     window.shutdown()
     window.close()
     return 0
