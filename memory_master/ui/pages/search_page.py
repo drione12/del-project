@@ -366,7 +366,6 @@ class SearchPage(QWidget):
         self._search_box.setEnabled(False)
         self._search_box.textChanged.connect(self._on_search_text_changed)
         search_row.addWidget(self._search_box, 1)
-        search_row.addWidget(QLabel("카테고리:"))
         search_row.addWidget(self._build_category_combo())
         layout.addLayout(search_row)
 

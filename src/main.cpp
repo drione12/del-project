@@ -52,7 +52,6 @@ constexpr int kShowHideHotkeyId = 1;
 // controls. kFilterButtonCount sizes kFilterLabels/kFilterCategories below
 // and is how many items get added to the combo box.
 constexpr int kCategoryComboId = 104;
-constexpr int kCategoryLabelId = 105;
 constexpr int kFilterButtonCount = 8;
 const wchar_t* kSingleInstanceMutexName = L"EverythingClone_SingleInstance_ceb2f6a1";
 const wchar_t* kWindowClassName = L"EverythingCloneWindow";
@@ -89,7 +88,6 @@ bool g_useRegex = false;
 // persisted to settings.ini, matching the four toggles above (a quick
 // browsing filter, not durable configuration); resets to All on relaunch.
 ResultCategory g_activeCategory = ResultCategory::All;
-HWND g_categoryLabel = nullptr;
 HWND g_categoryCombo = nullptr;
 const wchar_t* const kFilterLabels[kFilterButtonCount] = {
     L"전체", L"음악", L"압축파일", L"문서", L"실행파일", L"폴더", L"이미지", L"비디오",
@@ -1085,10 +1083,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // Real placeholder geometry doesn't matter, the first WM_SIZE
             // (already sent as part of window creation/ShowWindow, same as
             // every other control here) repositions everything from scratch.
-            // Disabled until indexing finishes, matching g_searchBox.
-            g_categoryLabel = CreateWindowExW(
-                0, L"STATIC", L"카테고리:", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCategoryLabelId)), nullptr, nullptr);
+            // Disabled until indexing finishes, matching g_searchBox. No
+            // "카테고리:" label alongside it (there was one briefly) - a
+            // real run showed it crammed against the combo box, text
+            // overlapping/clipped; the combo's own selected-item text
+            // ("전체" etc.) reads fine alone.
             g_categoryCombo = CreateWindowExW(
                 0, WC_COMBOBOXW, L"",
                 WS_CHILD | WS_VISIBLE | WS_DISABLED | WS_TABSTOP | CBS_DROPDOWNLIST, 0, 0, 0, 0, hwnd,
@@ -1183,9 +1182,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int w = LOWORD(lParam), h = HIWORD(lParam);
             MoveWindow(g_status, 8, 8, w - 16, 20, TRUE);
 
-            int comboW = 150, labelW = 60, gap = 8;
-            MoveWindow(g_searchBox, 8, 32, w - 16 - gap - labelW - gap - comboW, 26, TRUE);
-            MoveWindow(g_categoryLabel, w - 8 - comboW - gap - labelW, 32, labelW, 26, TRUE);
+            int comboW = 150, gap = 8;
+            MoveWindow(g_searchBox, 8, 32, w - 16 - gap - comboW, 26, TRUE);
             // nHeight=200 here is the *dropdown-open* list height (a
             // CBS_DROPDOWNLIST quirk) - the closed-state height is
             // font-driven and unaffected by this parameter.
