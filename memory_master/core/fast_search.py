@@ -11,11 +11,28 @@ constructor itself would fail off Windows (no ctypes.WinDLL, no
 EverythingCore.dll) - callers must guard construction with is_available()
 plus their own sys.platform check, and use core/file_search.py's slow
 os.walk search instead when either is false.
+
+Every public method takes self._lock: ui/pages/search_page.py now runs
+search() on a background QThread (_SearchWorker) instead of the UI thread,
+so overlapping calls into this same handle are a real possibility - a slow
+search still in flight when the next debounced one starts, or a search
+racing _FastIndexWorker's build_index() (belt-and-suspenders: the UI
+disables the search box during indexing, but a debounce timer armed just
+before that disable takes effect could still slip a call through). All of
+EC_Search/EC_GetResult*/EC_BuildIndex/EC_Destroy read or write the same
+per-handle EC_State::lastResults buffer on the C++ side (src/core_api.h) -
+calling into it concurrently from two threads is a real native data race/
+use-after-free risk, not just a logic bug, so every call is serialized
+here. Safe to block on: the only caller that ever waits on this lock from
+the UI thread is stop() (via save_indexes()/close()), and only after both
+of SearchPage's workers are already confirmed stopped - see that method's
+own docstring.
 """
 from __future__ import annotations
 
 import os
 import sys
+import threading
 from typing import List
 
 from core.file_search import CATEGORIES, FileEntry
@@ -65,6 +82,7 @@ class FastSearchEngine:
     def __init__(self) -> None:
         import ctypes
 
+        self._lock = threading.Lock()
         self._dll = ctypes.WinDLL(resource_path("EverythingCore.dll"))
         self._bind_functions()
         self._handle = self._dll.EC_Create()
@@ -114,17 +132,20 @@ class FastSearchEngine:
         volume - 0 usually means this process isn't elevated (raw volume
         access needs administrator rights), not that the drives are empty.
         """
-        return int(self._dll.EC_BuildIndex(self._handle))
+        with self._lock:
+            return int(self._dll.EC_BuildIndex(self._handle))
 
     def save_indexes(self) -> None:
         """Persists every volume's index to disk so the next build_index()
         (a future run of this app) can use the fast snapshot+catch-up path
         instead of a full MFT rescan. Call before close() on a clean exit.
         """
-        self._dll.EC_SaveIndexes(self._handle)
+        with self._lock:
+            self._dll.EC_SaveIndexes(self._handle)
 
     def total_count(self) -> int:
-        return int(self._dll.EC_TotalCount(self._handle))
+        with self._lock:
+            return int(self._dll.EC_TotalCount(self._handle))
 
     def search(self, query: str, category: str, max_results: int) -> List[FileEntry]:
         """category must be one of core.file_search.CATEGORIES. Note this
@@ -138,35 +159,37 @@ class FastSearchEngine:
         """
         import ctypes
 
-        category_index = _CATEGORY_TO_INDEX.get(category, 0)
-        count = self._dll.EC_Search(self._handle, query, category_index, max_results)
+        with self._lock:
+            category_index = _CATEGORY_TO_INDEX.get(category, 0)
+            count = self._dll.EC_Search(self._handle, query, category_index, max_results)
 
-        buf = ctypes.create_unicode_buffer(_PATH_BUFFER_CHARS)
-        entries: List[FileEntry] = []
-        for i in range(count):
-            self._dll.EC_GetResultPath(self._handle, i, buf, _PATH_BUFFER_CHARS)
-            path = buf.value
-            attributes = self._dll.EC_GetResultAttributes(self._handle, i)
-            is_dir = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
-            size_bytes = 0 if is_dir else int(self._dll.EC_GetResultSize(self._handle, i))
-            modified_at = _filetime_to_epoch(self._dll.EC_GetResultModifiedTime(self._handle, i))
-            created_at = _filetime_to_epoch(self._dll.EC_GetResultCreatedTime(self._handle, i))
-            accessed_at = _filetime_to_epoch(self._dll.EC_GetResultAccessedTime(self._handle, i))
-            entries.append(
-                FileEntry(
-                    name=os.path.basename(path),
-                    path=path,
-                    size_bytes=size_bytes,
-                    modified_at=modified_at,
-                    is_dir=is_dir,
-                    created_at=created_at,
-                    accessed_at=accessed_at,
-                    attributes=attributes,
+            buf = ctypes.create_unicode_buffer(_PATH_BUFFER_CHARS)
+            entries: List[FileEntry] = []
+            for i in range(count):
+                self._dll.EC_GetResultPath(self._handle, i, buf, _PATH_BUFFER_CHARS)
+                path = buf.value
+                attributes = self._dll.EC_GetResultAttributes(self._handle, i)
+                is_dir = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
+                size_bytes = 0 if is_dir else int(self._dll.EC_GetResultSize(self._handle, i))
+                modified_at = _filetime_to_epoch(self._dll.EC_GetResultModifiedTime(self._handle, i))
+                created_at = _filetime_to_epoch(self._dll.EC_GetResultCreatedTime(self._handle, i))
+                accessed_at = _filetime_to_epoch(self._dll.EC_GetResultAccessedTime(self._handle, i))
+                entries.append(
+                    FileEntry(
+                        name=os.path.basename(path),
+                        path=path,
+                        size_bytes=size_bytes,
+                        modified_at=modified_at,
+                        is_dir=is_dir,
+                        created_at=created_at,
+                        accessed_at=accessed_at,
+                        attributes=attributes,
+                    )
                 )
-            )
-        return entries
+            return entries
 
     def close(self) -> None:
-        if self._handle is not None:
-            self._dll.EC_Destroy(self._handle)
-            self._handle = None
+        with self._lock:
+            if self._handle is not None:
+                self._dll.EC_Destroy(self._handle)
+                self._handle = None

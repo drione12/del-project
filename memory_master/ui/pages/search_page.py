@@ -10,7 +10,7 @@ EverythingClone.exe child window (spawned as a subprocess, its window
 parented into this page via core/everything_embed.py's ctypes helpers) vs.
 this page's own from-scratch Python search - picked by a thin coordinator.
 Collapsed into this one class now that the fast path also renders through
-this same QTableWidget-based UI instead of hosting a second process's own
+this same QTableView-based UI instead of hosting a second process's own
 window: EverythingClone's engine runs in-process via ctypes now, so there's
 no second window to host, no subprocess to manage, and no UIPI concern
 (Windows blocking/degrading window-parenting across different integrity
@@ -32,10 +32,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import psutil
-from PyQt5.QtCore import QThread, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QAbstractTableModel, QModelIndex, QThread, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -51,8 +51,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
@@ -85,7 +84,7 @@ _COL_EXTENSION = 6
 _COL_ATTRIBUTES = 7
 
 _MAX_DISPLAYED_RESULTS = 2000
-_SEARCH_DEBOUNCE_MS = 200
+_SEARCH_DEBOUNCE_MS = 250
 _PREVIEW_PLACEHOLDER_TEXT = "이미지를 선택하면\n미리보기가 표시됩니다"
 
 # (category, label) pairs for the category filter dropdown, in display
@@ -139,8 +138,87 @@ def _fixed_drive_roots() -> List[str]:
     return roots
 
 
-class _ResultsTable(QTableWidget):
-    """Adds Del-key support on top of QTableWidget - there is no existing
+def _column_text(entry: FileEntry, col: int) -> str:
+    if col == _COL_NAME:
+        return entry.name
+    if col == _COL_PATH:
+        return entry.path
+    if col == _COL_SIZE:
+        return "-" if entry.is_dir else format_bytes(entry.size_bytes)
+    if col == _COL_MODIFIED:
+        return format_datetime(entry.modified_at)
+    if col == _COL_CREATED:
+        return format_datetime(entry.created_at)
+    if col == _COL_ACCESSED:
+        return format_datetime(entry.accessed_at)
+    if col == _COL_EXTENSION:
+        return format_extension(entry.name, entry.is_dir)
+    if col == _COL_ATTRIBUTES:
+        return format_attributes(entry.attributes)
+    return ""
+
+
+class _ResultsTableModel(QAbstractTableModel):
+    """Virtualized backing store for _ResultsTable (QTableView) - Qt only
+    ever calls data()/headerData() for cells actually on screen (plus a
+    small readahead), unlike the old QTableWidget-based _render_results
+    which eagerly built one QTableWidgetItem per cell for every row up
+    front. That eager construction was the main UI-lag source once result
+    counts got large (large index -> large result set -> thousands of
+    QTableWidgetItem objects built and laid out synchronously) - this model
+    only ever materializes what's actually visible.
+    """
+
+    _HEADERS = ["이름", "경로", "크기", "수정한 날짜", "생성한 날짜", "액세스한 날짜", "확장자", "속성"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._entries: List[FileEntry] = []
+
+    def set_entries(self, entries: List[FileEntry]) -> None:
+        self.beginResetModel()
+        self._entries = entries
+        self.endResetModel()
+
+    def entries(self) -> List[FileEntry]:
+        return self._entries
+
+    def entry_at(self, row: int) -> Optional[FileEntry]:
+        if 0 <= row < len(self._entries):
+            return self._entries[row]
+        return None
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._entries)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._HEADERS)
+
+    def headerData(self, section: int, orientation, role: int = Qt.DisplayRole):
+        if orientation == Qt.Horizontal:
+            if role == Qt.DisplayRole:
+                return self._HEADERS[section]
+            return None
+        # Falls back to QAbstractItemModel's own default (1-based row
+        # numbers) for the vertical header, same as QTableWidget showed
+        # before - only the horizontal (column) headers are ever customized.
+        return super().headerData(section, orientation, role)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        entry = self._entries[index.row()]
+        col = index.column()
+        if role == Qt.DisplayRole:
+            return _column_text(entry, col)
+        if role == Qt.DecorationRole and col == _COL_NAME:
+            pixmap = get_icon_for_path(entry.path, entry.is_dir)
+            return QIcon(pixmap) if pixmap is not None else None
+        return None
+
+
+class _ResultsTable(QTableView):
+    """Adds Del-key support on top of QTableView - there is no existing
     precedent for this anywhere else in the app, so it's kept local rather
     than added as a generic shared widget for a single consumer.
     """
@@ -152,6 +230,31 @@ class _ResultsTable(QTableWidget):
             self.deleteRequested.emit()
         else:
             super().keyPressEvent(event)
+
+
+class _SearchWorker(QThread):
+    """Runs one search off the UI thread so a slow query (large index, or
+    the slow os.walk-backed fallback) can't freeze typing/scrolling.
+    search_fn is a zero-arg closure that already captured its query/
+    category/backend snapshot on the main thread at construction time (Qt
+    widgets, and self._index/self._fast_engine, must not be touched from
+    run(), which executes on this worker's own thread). generation is
+    echoed back unchanged so SearchPage._on_search_result_ready can discard
+    a result if a newer search was started before this one finished -
+    debounce alone doesn't rule out overlap (e.g. a slow query still
+    running when the next debounced search fires).
+    """
+
+    resultReady = pyqtSignal(list, str, int)  # List[FileEntry], status_text, generation
+
+    def __init__(self, search_fn: Callable[[], Tuple[List[FileEntry], str]], generation: int, parent=None):
+        super().__init__(parent)
+        self._search_fn = search_fn
+        self._generation = generation
+
+    def run(self) -> None:
+        results, status_text = self._search_fn()
+        self.resultReady.emit(results, status_text, self._generation)
 
 
 class _IndexWorker(QThread):
@@ -247,8 +350,9 @@ class SearchPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._index: List[FileEntry] = []  # only populated/used by the slow backend
-        self._by_path: Dict[str, FileEntry] = {}
         self._worker: Optional[QThread] = None  # one at a time, mirrors CleanupPage
+        self._search_worker: Optional[QThread] = None  # separate slot: can overlap self._worker
+        self._search_generation = 0  # bumped per _apply_search() call; discards stale results
         self._auto_indexed = False  # first showEvent kicks off indexing, not __init__
         self._active_category = "all"
         self._fast_engine: Optional[FastSearchEngine] = self._create_fast_engine()
@@ -390,11 +494,13 @@ class SearchPage(QWidget):
         # own native ListView (src/main.cpp) - same reasoning as the
         # category filter dropdown: this page and EverythingClone's window
         # are meant to look/behave the same regardless of which backend is
-        # actually running underneath (see the module docstring).
-        table = _ResultsTable(0, 8)
-        table.setHorizontalHeaderLabels(
-            ["이름", "경로", "크기", "수정한 날짜", "생성한 날짜", "액세스한 날짜", "확장자", "속성"]
-        )
+        # actually running underneath (see the module docstring). Backed by
+        # _ResultsTableModel (QAbstractTableModel) instead of QTableWidget
+        # items so only visible rows are ever materialized - see that
+        # class's docstring for why.
+        table = _ResultsTable()
+        self._results_model = _ResultsTableModel(self)
+        table.setModel(self._results_model)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -411,7 +517,9 @@ class SearchPage(QWidget):
         table.setContextMenuPolicy(Qt.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         table.deleteRequested.connect(self._on_delete_requested)
-        table.itemSelectionChanged.connect(self._update_preview)
+        # setModel() must run before selectionModel() exists - connected
+        # here rather than up front for that reason.
+        table.selectionModel().selectionChanged.connect(lambda *_args: self._update_preview())
         return table
 
     @staticmethod
@@ -430,7 +538,7 @@ class SearchPage(QWidget):
             self._reindex_btn.setEnabled(False)
             self._search_box.setEnabled(False)
             self._category_combo.setEnabled(False)
-            self._results_table.setRowCount(0)
+            self._results_model.set_entries([])
             self._index_status_label.setText("인덱싱 중...")
 
             worker = _FastIndexWorker(self._fast_engine, self)
@@ -447,7 +555,7 @@ class SearchPage(QWidget):
         self._reindex_btn.setEnabled(False)
         self._search_box.setEnabled(False)
         self._category_combo.setEnabled(False)
-        self._results_table.setRowCount(0)
+        self._results_model.set_entries([])
         self._index_status_label.setText("인덱싱 중... (전체 드라이브, 다소 시간이 걸릴 수 있습니다)")
 
         worker = _IndexWorker(roots, self)
@@ -466,7 +574,6 @@ class SearchPage(QWidget):
     def _on_index_ready(self, entries: List[FileEntry]) -> None:
         self._reindex_btn.setEnabled(True)
         self._index = entries
-        self._by_path = {e.path: e for e in entries}
         self._index_status_label.setText(f"{len(entries)}개 항목 인덱싱됨")
         self._search_box.setEnabled(True)
         self._search_box.setPlaceholderText("검색어 입력...")
@@ -490,66 +597,72 @@ class SearchPage(QWidget):
         self._search_timer.start()
 
     def _apply_search(self) -> None:
-        if self._fast_engine is not None:
-            # Category filtering already happened inside the engine
-            # (src/query.cpp's MatchesCategory, via EC_Search's category
-            # argument) - unlike the slow backend below, no separate
-            # matches_category pass is needed here.
-            results = self._fast_engine.search(
-                self._search_box.text(), self._active_category, _MAX_DISPLAYED_RESULTS
-            )
-            # "X / Y개 표시" (shown / total indexed) rather than the slow
-            # backend's "shown out of N matches" - matches EverythingClone's
-            # own status text convention (main.cpp), since this engine has
-            # no cheap way to report a true match count once maxResults
-            # truncates the scan (see src/ntfs_index.cpp's Search).
-            status = f"{len(results)} / {self._fast_engine.total_count()}개 표시"
-            self._render_results(results, status)
-            return
+        """Builds a zero-arg do_search() closure that snapshots everything
+        it needs (query text, category, and either the fast engine or the
+        current slow-backend index) right here on the main thread, then runs
+        it on a _SearchWorker so a slow query can't freeze the UI. do_search
+        itself must not touch any QWidget - see _SearchWorker's docstring.
+        """
+        self._search_generation += 1
+        generation = self._search_generation
+        query = self._search_box.text()
+        category = self._active_category
 
-        results = search_entries(self._index, self._search_box.text()) if self._index else []
-        if self._active_category != "all":
-            results = [e for e in results if matches_category(e, self._active_category)]
-        total = len(results)
-        capped = results[:_MAX_DISPLAYED_RESULTS]
-        if total > _MAX_DISPLAYED_RESULTS:
-            status = f"{_MAX_DISPLAYED_RESULTS}개 표시 중 (전체 {total}개 일치)"
+        if self._fast_engine is not None:
+            engine = self._fast_engine
+
+            def do_search() -> Tuple[List[FileEntry], str]:
+                # Category filtering already happened inside the engine
+                # (src/query.cpp's MatchesCategory, via EC_Search's category
+                # argument) - unlike the slow backend below, no separate
+                # matches_category pass is needed here.
+                results = engine.search(query, category, _MAX_DISPLAYED_RESULTS)
+                # "X / Y개 표시" (shown / total indexed) rather than the slow
+                # backend's "shown out of N matches" - matches
+                # EverythingClone's own status text convention (main.cpp),
+                # since this engine has no cheap way to report a true match
+                # count once maxResults truncates the scan (see
+                # src/ntfs_index.cpp's Search).
+                status = f"{len(results)} / {engine.total_count()}개 표시"
+                return results, status
         else:
-            status = f"{total}개 일치"
-        self._render_results(capped, status)
+            index = self._index
+
+            def do_search() -> Tuple[List[FileEntry], str]:
+                results = search_entries(index, query) if index else []
+                if category != "all":
+                    results = [e for e in results if matches_category(e, category)]
+                total = len(results)
+                capped = results[:_MAX_DISPLAYED_RESULTS]
+                if total > _MAX_DISPLAYED_RESULTS:
+                    status = f"{_MAX_DISPLAYED_RESULTS}개 표시 중 (전체 {total}개 일치)"
+                else:
+                    status = f"{total}개 일치"
+                return capped, status
+
+        worker = _SearchWorker(do_search, generation, self)
+        worker.resultReady.connect(self._on_search_result_ready)
+        worker.finished.connect(worker.deleteLater)
+        self._search_worker = worker
+        worker.start()
+
+    def _on_search_result_ready(self, results: List[FileEntry], status_text: str, generation: int) -> None:
+        if generation != self._search_generation:
+            return  # superseded by a newer search started before this one finished
+        self._render_results(results, status_text)
 
     def _render_results(self, results: List[FileEntry], status_text: str) -> None:
-        table = self._results_table
-        table.setRowCount(len(results))
-        for row, entry in enumerate(results):
-            name_item = QTableWidgetItem(entry.name)
-            name_item.setData(Qt.UserRole, entry.path)
-            pixmap = get_icon_for_path(entry.path, entry.is_dir)
-            if pixmap is not None:
-                name_item.setIcon(QIcon(pixmap))
-            table.setItem(row, _COL_NAME, name_item)
-            table.setItem(row, _COL_PATH, QTableWidgetItem(entry.path))
-            size_text = "-" if entry.is_dir else format_bytes(entry.size_bytes)
-            table.setItem(row, _COL_SIZE, QTableWidgetItem(size_text))
-            table.setItem(row, _COL_MODIFIED, QTableWidgetItem(format_datetime(entry.modified_at)))
-            table.setItem(row, _COL_CREATED, QTableWidgetItem(format_datetime(entry.created_at)))
-            table.setItem(row, _COL_ACCESSED, QTableWidgetItem(format_datetime(entry.accessed_at)))
-            table.setItem(row, _COL_EXTENSION, QTableWidgetItem(format_extension(entry.name, entry.is_dir)))
-            table.setItem(row, _COL_ATTRIBUTES, QTableWidgetItem(format_attributes(entry.attributes)))
+        self._results_model.set_entries(results)
         self._results_status_label.setText(status_text)
-        # Keyed off exactly what's on screen right now, not the whole index
-        # - _selected_entries below only ever needs to resolve a currently
-        # selected (so currently displayed) row's path back to a FileEntry.
-        self._by_path = {e.path: e for e in results}
 
     def _selected_entries(self) -> List[FileEntry]:
-        rows = {idx.row() for idx in self._results_table.selectedIndexes()}
+        selection_model = self._results_table.selectionModel()
+        if selection_model is None:
+            return []
+        rows = sorted({index.row() for index in selection_model.selectedRows()})
         entries = []
-        for row in sorted(rows):
-            item = self._results_table.item(row, _COL_NAME)
-            if item is None:
-                continue
-            entry = self._by_path.get(item.data(Qt.UserRole))
+        for row in rows:
+            entry = self._results_model.entry_at(row)
             if entry is not None:
                 entries.append(entry)
         return entries
@@ -593,7 +706,8 @@ class SearchPage(QWidget):
         row = self._results_table.rowAt(pos.y())
         if row < 0:
             return
-        if not self._results_table.item(row, _COL_NAME).isSelected():
+        index = self._results_model.index(row, _COL_NAME)
+        if not self._results_table.selectionModel().isSelected(index):
             self._results_table.selectRow(row)
 
         entries = self._selected_entries()
@@ -710,17 +824,16 @@ class SearchPage(QWidget):
     def _remove_deleted_paths(self, paths) -> None:
         """Removes successfully-deleted paths (and, for a deleted
         directory, everything currently displayed under it) directly from
-        the results table and self._by_path, rather than re-running a
-        search - correct for both backends without depending on either
-        one's index having caught up with the delete first. That matters
-        more for the fast backend than it used to for the slow one alone:
-        its index only updates once the live USN watcher processes the
-        change, which isn't necessarily instant, so an immediate re-search
-        right after a delete could still briefly show the just-deleted
-        file. The trailing separator on each prefix is what stops
-        "Downloads" from matching "Downloads2" (same boundary bug
-        path_guard.py's is_within_or_equal fixes, applied here just for
-        display hygiene rather than a safety check).
+        the results model, rather than re-running a search - correct for
+        both backends without depending on either one's index having caught
+        up with the delete first. That matters more for the fast backend
+        than it used to for the slow one alone: its index only updates once
+        the live USN watcher processes the change, which isn't necessarily
+        instant, so an immediate re-search right after a delete could still
+        briefly show the just-deleted file. The trailing separator on each
+        prefix is what stops "Downloads" from matching "Downloads2" (same
+        boundary bug path_guard.py's is_within_or_equal fixes, applied here
+        just for display hygiene rather than a safety check).
         """
         if not paths:
             return
@@ -729,13 +842,9 @@ class SearchPage(QWidget):
         def is_deleted(path: str) -> bool:
             return path in paths or path.startswith(prefixes)
 
-        table = self._results_table
-        for row in range(table.rowCount() - 1, -1, -1):
-            item = table.item(row, _COL_NAME)
-            if item is not None and is_deleted(item.data(Qt.UserRole)):
-                table.removeRow(row)
+        remaining = [e for e in self._results_model.entries() if not is_deleted(e.path)]
+        self._results_model.set_entries(remaining)
 
-        self._by_path = {p: e for p, e in self._by_path.items() if not is_deleted(p)}
         if self._fast_engine is None:
             self._index = [e for e in self._index if not is_deleted(e.path)]
 
@@ -755,47 +864,54 @@ class SearchPage(QWidget):
                 "관리자 권한으로 다시 시작하지 못했습니다. 직접 관리자 권한으로 실행해 주세요.",
             )
 
-    def stop(self) -> None:
-        """Cancels/waits for any in-flight worker, then closes the fast
-        engine if one was created - same reasoning as before this class
-        ever touched a DLL (destroying a live QThread is undefined
-        behavior in Qt) for the worker half, but closing the fast engine
-        adds a sharper failure mode than a merely-orphaned QThread: closing
-        it while a _FastIndexWorker's EC_BuildIndex call is *still running*
-        on another thread would free state that call is still touching - a
-        real C++ use-after-free, not just Python/Qt object churn. So the
-        fast engine is only closed once the worker is confirmed stopped
-        (wait() returned True) or already gone (the RuntimeError case
-        below - see its own comment). If wait() times out, the fast engine
-        (and its background USN-watcher threads) is deliberately left to
-        leak for the rest of this process's life rather than risk that -
-        safe, since this only ever runs from aboutToQuit, i.e. the process
-        is exiting anyway.
+    @staticmethod
+    def _wait_for_worker(worker: Optional[QThread]) -> bool:
+        """Cancels/waits for one worker, returning whether it's confirmed
+        stopped (used by stop() below to gate closing the fast engine).
 
         The RuntimeError guard covers a real, confirmed-reachable case: a
         worker that already finished (every worker here connects
         finished -> deleteLater) has its underlying Qt object destroyed the
         next time the event loop runs - which, in a long-running real app,
         has near-certainly already happened by the time the user gets
-        around to closing it. self._worker is then a dangling wrapper
-        around a deleted object; touching it (getattr included - sip
-        raises RuntimeError, not AttributeError, so getattr's own default
-        doesn't catch it) raises instead of behaving like None. There's
-        nothing to cancel or wait for in that case - the worker (and
-        whatever EC_BuildIndex call it may have been running) has
-        definitely already finished, so it's safe to close the fast engine.
+        around to closing it. The passed-in reference is then a dangling
+        wrapper around a deleted object; touching it (getattr included -
+        sip raises RuntimeError, not AttributeError, so getattr's own
+        default doesn't catch it) raises instead of behaving like None.
+        There's nothing to cancel or wait for in that case - the worker
+        (and whatever DLL call it may have been running) has definitely
+        already finished, so this reports it as confirmed-stopped.
         """
-        worker_confirmed_stopped = True
-        if self._worker is not None:
-            try:
-                cancel = getattr(self._worker, "cancel", None)
-                if callable(cancel):
-                    cancel()
-                worker_confirmed_stopped = self._worker.wait(10000)
-            except RuntimeError:
-                pass
+        if worker is None:
+            return True
+        try:
+            cancel = getattr(worker, "cancel", None)
+            if callable(cancel):
+                cancel()
+            return worker.wait(10000)
+        except RuntimeError:
+            return True
 
-        if self._fast_engine is not None and worker_confirmed_stopped:
+    def stop(self) -> None:
+        """Cancels/waits for any in-flight index/delete worker and any
+        in-flight search worker, then closes the fast engine if one was
+        created - same reasoning as before this class ever touched a DLL
+        (destroying a live QThread is undefined behavior in Qt), but closing
+        the fast engine adds a sharper failure mode than a merely-orphaned
+        QThread: closing it while a _FastIndexWorker's EC_BuildIndex call or
+        a _SearchWorker's engine.search() call is *still running* on another
+        thread would free state that call is still touching - a real C++
+        use-after-free, not just Python/Qt object churn. So the fast engine
+        is only closed once *both* workers are confirmed stopped. If either
+        wait() times out, the fast engine (and its background USN-watcher
+        threads) is deliberately left to leak for the rest of this
+        process's life rather than risk that - safe, since this only ever
+        runs from aboutToQuit, i.e. the process is exiting anyway.
+        """
+        worker_stopped = self._wait_for_worker(self._worker)
+        search_worker_stopped = self._wait_for_worker(self._search_worker)
+
+        if self._fast_engine is not None and worker_stopped and search_worker_stopped:
             self._fast_engine.save_indexes()
             self._fast_engine.close()
 
