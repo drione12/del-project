@@ -100,6 +100,12 @@ class FastSearchEngine:
         dll.EC_GetResultModifiedTime.argtypes = [ctypes.c_void_p, ctypes.c_int]
         dll.EC_GetResultModifiedTime.restype = ctypes.c_uint64
 
+        dll.EC_GetResultCreatedTime.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        dll.EC_GetResultCreatedTime.restype = ctypes.c_uint64
+
+        dll.EC_GetResultAccessedTime.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        dll.EC_GetResultAccessedTime.restype = ctypes.c_uint64
+
         dll.EC_GetResultAttributes.argtypes = [ctypes.c_void_p, ctypes.c_int]
         dll.EC_GetResultAttributes.restype = ctypes.c_uint32
 
@@ -144,6 +150,8 @@ class FastSearchEngine:
             is_dir = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
             size_bytes = 0 if is_dir else int(self._dll.EC_GetResultSize(self._handle, i))
             modified_at = _filetime_to_epoch(self._dll.EC_GetResultModifiedTime(self._handle, i))
+            created_at = _filetime_to_epoch(self._dll.EC_GetResultCreatedTime(self._handle, i))
+            accessed_at = _filetime_to_epoch(self._dll.EC_GetResultAccessedTime(self._handle, i))
             entries.append(
                 FileEntry(
                     name=os.path.basename(path),
@@ -151,6 +159,9 @@ class FastSearchEngine:
                     size_bytes=size_bytes,
                     modified_at=modified_at,
                     is_dir=is_dir,
+                    created_at=created_at,
+                    accessed_at=accessed_at,
+                    attributes=attributes,
                 )
             )
         return entries

@@ -63,7 +63,7 @@ from core.fast_search import is_available as fast_search_available
 from core.file_search import CATEGORIES, FileEntry, build_index, matches_category
 from core.file_search import search as search_entries
 from core.force_delete import AnalyzeResult, ExecuteOptions, ExecuteResult, execute
-from core.formatting import format_bytes, format_datetime_kr
+from core.formatting import format_attributes, format_bytes, format_datetime, format_extension
 from core.image_scanner import is_image_file
 from core.trash import send_to_trash
 from core.workers import AnalyzeWorker, ExecuteWorker
@@ -79,6 +79,10 @@ _COL_NAME = 0
 _COL_PATH = 1
 _COL_SIZE = 2
 _COL_MODIFIED = 3
+_COL_CREATED = 4
+_COL_ACCESSED = 5
+_COL_EXTENSION = 6
+_COL_ATTRIBUTES = 7
 
 _MAX_DISPLAYED_RESULTS = 2000
 _SEARCH_DEBOUNCE_MS = 200
@@ -382,8 +386,15 @@ class SearchPage(QWidget):
         return frame
 
     def _build_results_table(self) -> _ResultsTable:
-        table = _ResultsTable(0, 4)
-        table.setHorizontalHeaderLabels(["이름", "경로", "크기", "수정한 날짜"])
+        # 8 columns, same headers/order as the separate C++ EverythingClone's
+        # own native ListView (src/main.cpp) - same reasoning as the
+        # category filter dropdown: this page and EverythingClone's window
+        # are meant to look/behave the same regardless of which backend is
+        # actually running underneath (see the module docstring).
+        table = _ResultsTable(0, 8)
+        table.setHorizontalHeaderLabels(
+            ["이름", "경로", "크기", "수정한 날짜", "생성한 날짜", "액세스한 날짜", "확장자", "속성"]
+        )
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -392,6 +403,10 @@ class SearchPage(QWidget):
         header.setSectionResizeMode(_COL_PATH, QHeaderView.Stretch)
         header.setSectionResizeMode(_COL_SIZE, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(_COL_MODIFIED, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(_COL_CREATED, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(_COL_ACCESSED, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(_COL_EXTENSION, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(_COL_ATTRIBUTES, QHeaderView.ResizeToContents)
         table.setColumnWidth(_COL_NAME, 220)
         table.setContextMenuPolicy(Qt.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
@@ -516,7 +531,11 @@ class SearchPage(QWidget):
             table.setItem(row, _COL_PATH, QTableWidgetItem(entry.path))
             size_text = "-" if entry.is_dir else format_bytes(entry.size_bytes)
             table.setItem(row, _COL_SIZE, QTableWidgetItem(size_text))
-            table.setItem(row, _COL_MODIFIED, QTableWidgetItem(format_datetime_kr(entry.modified_at)))
+            table.setItem(row, _COL_MODIFIED, QTableWidgetItem(format_datetime(entry.modified_at)))
+            table.setItem(row, _COL_CREATED, QTableWidgetItem(format_datetime(entry.created_at)))
+            table.setItem(row, _COL_ACCESSED, QTableWidgetItem(format_datetime(entry.accessed_at)))
+            table.setItem(row, _COL_EXTENSION, QTableWidgetItem(format_extension(entry.name, entry.is_dir)))
+            table.setItem(row, _COL_ATTRIBUTES, QTableWidgetItem(format_attributes(entry.attributes)))
         self._results_status_label.setText(status_text)
         # Keyed off exactly what's on screen right now, not the whole index
         # - _selected_entries below only ever needs to resolve a currently

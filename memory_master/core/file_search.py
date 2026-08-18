@@ -27,6 +27,18 @@ class FileEntry:
     size_bytes: int  # 0 for directories - see build_index
     modified_at: float  # st_mtime, epoch seconds
     is_dir: bool
+    # Defaulted (not required at every call site, e.g. tests/test_file_search.py's
+    # _entry() helper) - 0 is each field's own "unknown" sentinel, matching
+    # core/formatting.py's format_datetime/format_attributes/format_extension
+    # and the fast backend's own FILETIME-0/no-bits-set conventions
+    # (core/fast_search.py). created_at/accessed_at are st_ctime/st_atime -
+    # on Windows (this app's only real target) st_ctime is creation time,
+    # not the "metadata change time" it means on Unix. attributes is the
+    # raw Win32 FILE_ATTRIBUTE_* bitmask (os.stat_result.st_file_attributes,
+    # Windows-only - see build_index for why this stays 0 elsewhere).
+    created_at: float = 0.0
+    accessed_at: float = 0.0
+    attributes: int = 0
 
 
 def _count_entries(root: str) -> int:
@@ -71,10 +83,21 @@ def build_index(
                     st = os.stat(long_path(path))
                     size_bytes = 0 if is_dir else st.st_size
                     modified_at = st.st_mtime
+                    created_at = st.st_ctime
+                    accessed_at = st.st_atime
+                    # Windows-only stat field (os.stat_result docs) - 0
+                    # (format_attributes' own "no flags" value) elsewhere,
+                    # e.g. this app's own Linux dev/test environment.
+                    attributes = getattr(st, "st_file_attributes", 0)
                 except OSError:
                     size_bytes = 0
                     modified_at = 0.0
-                by_path[path] = FileEntry(name, path, size_bytes, modified_at, is_dir)
+                    created_at = 0.0
+                    accessed_at = 0.0
+                    attributes = 0
+                by_path[path] = FileEntry(
+                    name, path, size_bytes, modified_at, is_dir, created_at, accessed_at, attributes
+                )
 
                 done += 1
                 if on_progress is not None:

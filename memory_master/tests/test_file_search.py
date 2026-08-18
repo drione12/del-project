@@ -49,6 +49,36 @@ def test_build_index_file_has_correct_size():
         assert entries[0].is_dir is False
 
 
+def test_build_index_populates_created_and_accessed_times():
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "a.txt"), "wb") as f:
+            f.write(b"x")
+
+        entry = build_index([tmp])[0]
+
+        # A just-created file's created/accessed times should be real,
+        # recent (nonzero) timestamps, not the 0.0 "unknown"/os.stat()-failed
+        # sentinel - the actual moment-in-time value isn't asserted since
+        # this only needs to confirm the fields are wired up, not pin down
+        # filesystem timestamp precision.
+        assert entry.created_at > 0
+        assert entry.accessed_at > 0
+
+
+def test_build_index_attributes_defaults_safely_off_windows():
+    # st_file_attributes only exists on Windows (os.stat_result docs) -
+    # this suite only ever runs off Windows (see memory_master/README.md),
+    # so this confirms the getattr(..., 0) fallback doesn't raise here,
+    # not any particular real attribute value.
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "a.txt"), "wb") as f:
+            f.write(b"x")
+
+        entry = build_index([tmp])[0]
+
+        assert entry.attributes == 0
+
+
 def test_build_index_dedupes_overlapping_roots():
     with tempfile.TemporaryDirectory() as tmp:
         nested = os.path.join(tmp, "nested")
