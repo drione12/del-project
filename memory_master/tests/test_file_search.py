@@ -65,18 +65,26 @@ def test_build_index_populates_created_and_accessed_times():
         assert entry.accessed_at > 0
 
 
-def test_build_index_attributes_defaults_safely_off_windows():
-    # st_file_attributes only exists on Windows (os.stat_result docs) -
-    # this suite only ever runs off Windows (see memory_master/README.md),
-    # so this confirms the getattr(..., 0) fallback doesn't raise here,
-    # not any particular real attribute value.
+def test_build_index_attributes_field_is_populated_without_raising():
+    # st_file_attributes only exists on Windows (os.stat_result docs) - off
+    # Windows the getattr(..., 0) fallback kicks in, so this suite's own
+    # Linux dev/test runs always see 0 here. But this same test file *also*
+    # runs for real on windows-latest (build-memory-master.yml's test job -
+    # this app's Windows-specific code paths are verified there, not
+    # skipped, see memory_master/README.md), where st_file_attributes is
+    # genuinely present - and a freshly-created file there typically
+    # already has FILE_ATTRIBUTE_ARCHIVE (32) set by the OS itself, not 0.
+    # So the only thing actually true on *both* platforms is "some valid
+    # non-negative int, wired up correctly" - not a specific value, which
+    # is real OS behavior this test has no business asserting either way.
     with tempfile.TemporaryDirectory() as tmp:
         with open(os.path.join(tmp, "a.txt"), "wb") as f:
             f.write(b"x")
 
         entry = build_index([tmp])[0]
 
-        assert entry.attributes == 0
+        assert isinstance(entry.attributes, int)
+        assert entry.attributes >= 0
 
 
 def test_build_index_dedupes_overlapping_roots():
