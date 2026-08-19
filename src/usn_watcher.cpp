@@ -41,37 +41,50 @@ void UsnWatcher::WatchLoop(wchar_t driveLetter, NtfsIndex& index, std::atomic<bo
 
     std::vector<BYTE> buffer(64 * 1024);
 
-    while (running.load()) {
-        READ_USN_JOURNAL_DATA_V0 read{};
-        read.StartUsn = journal.nextUsn;
-        read.ReasonMask = 0xFFFFFFFF;
-        read.ReturnOnlyOnClose = 0;
-        read.Timeout = 1;        // seconds; lets the loop re-check `running` periodically
-        read.BytesToWaitFor = 1; // block until at least one new record arrives
-        read.UsnJournalID = journal.journalId;
+    // try/catch around the whole loop, not just one call inside it: this
+    // function is a std::thread's own entry point (see EC_BuildIndex in
+    // core_api.cpp, which starts one of these per volume), so an uncaught
+    // exception here - most plausibly std::bad_alloc from
+    // index.ApplyUsnRecord's std::wstring/unordered_map operations under
+    // memory pressure - would call std::terminate() and kill the whole
+    // process, not just this watcher. Breaking out of the loop (rather than
+    // looping forever retrying whatever just threw) stops live-updating
+    // this one drive but leaves the rest of the app running; a later manual
+    // "다시 인덱싱" rebuilds it from scratch.
+    try {
+        while (running.load()) {
+            READ_USN_JOURNAL_DATA_V0 read{};
+            read.StartUsn = journal.nextUsn;
+            read.ReasonMask = 0xFFFFFFFF;
+            read.ReturnOnlyOnClose = 0;
+            read.Timeout = 1;        // seconds; lets the loop re-check `running` periodically
+            read.BytesToWaitFor = 1; // block until at least one new record arrives
+            read.UsnJournalID = journal.journalId;
 
-        DWORD bytesReturned = 0;
-        if (!DeviceIoControl(hVol, FSCTL_READ_USN_JOURNAL, &read, sizeof(read),
-                              buffer.data(), static_cast<DWORD>(buffer.size()),
-                              &bytesReturned, nullptr)) {
-            // Journal was likely reset/reallocated (e.g. volume format change);
-            // re-query its id and keep tailing.
-            if (!QueryJournal(hVol, journal)) break;
-            continue;
+            DWORD bytesReturned = 0;
+            if (!DeviceIoControl(hVol, FSCTL_READ_USN_JOURNAL, &read, sizeof(read),
+                                  buffer.data(), static_cast<DWORD>(buffer.size()),
+                                  &bytesReturned, nullptr)) {
+                // Journal was likely reset/reallocated (e.g. volume format change);
+                // re-query its id and keep tailing.
+                if (!QueryJournal(hVol, journal)) break;
+                continue;
+            }
+
+            USN nextUsn = *reinterpret_cast<USN*>(buffer.data());
+            BYTE* cursor = buffer.data() + sizeof(USN);
+            BYTE* end = buffer.data() + bytesReturned;
+
+            while (cursor < end) {
+                auto* record = reinterpret_cast<PUSN_RECORD>(cursor);
+                if (record->RecordLength == 0) break;
+                index.ApplyUsnRecord(record, hVol);
+                cursor += record->RecordLength;
+            }
+
+            journal.nextUsn = nextUsn;
         }
-
-        USN nextUsn = *reinterpret_cast<USN*>(buffer.data());
-        BYTE* cursor = buffer.data() + sizeof(USN);
-        BYTE* end = buffer.data() + bytesReturned;
-
-        while (cursor < end) {
-            auto* record = reinterpret_cast<PUSN_RECORD>(cursor);
-            if (record->RecordLength == 0) break;
-            index.ApplyUsnRecord(record, hVol);
-            cursor += record->RecordLength;
-        }
-
-        journal.nextUsn = nextUsn;
+    } catch (...) {
     }
 
     CloseHandle(hVol);
