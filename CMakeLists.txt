@@ -10,6 +10,25 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Statically link the MSVC C++ runtime (/MT instead of the default /MD) so
+# neither binary below depends on an externally-loaded MSVCP140.dll/
+# VCRUNTIME140*.dll at all. This matters specifically for EverythingCore -
+# when it's loaded via ctypes into Memory Master's process, PyQt5's own
+# bundled Qt5 binaries have *already* loaded their own (older, different
+# MSVC-toolset) copy of MSVCP140.dll by the time ctypes.CDLL runs; Windows'
+# loader tracks DLLs by name and reuses whatever's already mapped in the
+# process regardless of search path, so EverythingCore.dll's own runtime
+# calls were silently resolving into that mismatched-ABI copy instead of a
+# compatible one - a real access-violation crash (0xc0000005 inside
+# MSVCP140.dll, confirmed via Windows Event Viewer on a real crash) the
+# instant EC_BuildIndex's std::wstring/std::vector/std::thread-heavy code
+# ran, not a bug in this project's own code at all. /MT removes the
+# externally-loaded-runtime dependency entirely - EverythingCore.dll now
+# carries its own copy of everything it needs. Applied to both targets
+# (not just EverythingCore) so EverythingClone.exe also stays a genuinely
+# standalone binary with no VC++ Redistributable expectation either way.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 add_executable(EverythingClone WIN32
     src/main.cpp
     src/ntfs_index.cpp
