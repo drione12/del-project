@@ -51,6 +51,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -233,6 +234,46 @@ class _ResultsTable(QTableView):
             self.deleteRequested.emit()
         else:
             super().keyPressEvent(event)
+
+
+class _PreviewLabel(QLabel):
+    """Keeps the original, full-resolution QPixmap it was last given and
+    rescales *from that* (not from whatever's currently displayed) on every
+    resize - not just at selection time. Plain QLabel.setPixmap() only ever
+    draws at whatever size it's called with, so without this, dragging the
+    results/preview QSplitter handle after already selecting an image would
+    leave the preview pinned at its old size instead of growing/shrinking
+    live with the panel; rescaling from a re-shrunk copy on every resize
+    would also visibly degrade quality each time the panel grows back.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._original: Optional[QPixmap] = None
+
+    def set_original_pixmap(self, pixmap: QPixmap) -> None:
+        self._original = pixmap
+        self._rescale()
+
+    def clear_pixmap(self) -> None:
+        self._original = None
+        self.setPixmap(QPixmap())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._rescale()
+
+    def _rescale(self) -> None:
+        if self._original is None or self._original.isNull():
+            return
+        box = self.size()
+        if box.width() < 10 or box.height() < 10:
+            # Layout may not have settled yet (e.g. right after the page's
+            # very first show) - the label's own minimum size is a
+            # reliable floor since it was set explicitly, not derived from
+            # a layout pass that may not have run.
+            box = self.minimumSize()
+        self.setPixmap(self._original.scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
 
 class _SearchWorker(QThread):
@@ -509,12 +550,17 @@ class SearchPage(QWidget):
         self._results_status_label.setStyleSheet("color: #8c92a4; font-size: 12px;")
         layout.addWidget(self._results_status_label)
 
-        body = QHBoxLayout()
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)  # dragging a handle to the far edge shouldn't hide a panel entirely
         self._results_table = self._build_results_table()
-        body.addWidget(self._results_table, 2)
+        splitter.addWidget(self._results_table)
         self._preview_label = self._build_preview_label()
-        body.addWidget(self._preview_label, 1)
-        layout.addLayout(body, 1)
+        splitter.addWidget(self._preview_label)
+        # Initial split only - same ~2:1 proportion the old fixed
+        # QHBoxLayout stretch factors gave it, but now user-draggable via
+        # the splitter handle instead of fixed for the page's lifetime.
+        splitter.setSizes([700, 350])
+        layout.addWidget(splitter, 1)
         return frame
 
     def _build_results_table(self) -> _ResultsTable:
@@ -541,7 +587,7 @@ class SearchPage(QWidget):
         header.setSectionResizeMode(_COL_ACCESSED, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(_COL_EXTENSION, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(_COL_ATTRIBUTES, QHeaderView.ResizeToContents)
-        table.setColumnWidth(_COL_NAME, 220)
+        table.setColumnWidth(_COL_NAME, 300)
         table.setContextMenuPolicy(Qt.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
         table.deleteRequested.connect(self._on_delete_requested)
@@ -551,8 +597,8 @@ class SearchPage(QWidget):
         return table
 
     @staticmethod
-    def _build_preview_label() -> QLabel:
-        label = QLabel(_PREVIEW_PLACEHOLDER_TEXT)
+    def _build_preview_label() -> _PreviewLabel:
+        label = _PreviewLabel(_PREVIEW_PLACEHOLDER_TEXT)
         label.setAlignment(Qt.AlignCenter)
         label.setMinimumSize(280, 280)
         label.setWordWrap(True)
@@ -702,16 +748,9 @@ class SearchPage(QWidget):
         if len(entries) == 1 and not entries[0].is_dir and is_image_file(entries[0].path):
             pixmap = QPixmap(entries[0].path)
             if not pixmap.isNull():
-                box = self._preview_label.size()
-                if box.width() < 10 or box.height() < 10:
-                    # Layout may not have settled yet (e.g. right after the
-                    # page's very first show) - the label's own minimum
-                    # size is a reliable floor since it was set explicitly,
-                    # not derived from a layout pass that may not have run.
-                    box = self._preview_label.minimumSize()
-                self._preview_label.setPixmap(pixmap.scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self._preview_label.set_original_pixmap(pixmap)
                 return
-        self._preview_label.setPixmap(QPixmap())
+        self._preview_label.clear_pixmap()
         self._preview_label.setText(_PREVIEW_PLACEHOLDER_TEXT)
 
     # -- Del key / context menu --------------------------------------------

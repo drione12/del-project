@@ -1,19 +1,29 @@
 """Frameless main window: custom title bar + left icon sidebar driving a
 QStackedWidget across the app's pages. Minimize/maximize/close are all
-real; there's deliberately no drag-resize in v1 - and no code is needed to
-prevent it, since a frameless window (Qt.FramelessWindowHint) has no
-native edge/corner resize grips at all unless the app manually implements
-hit-testing for them (which this doesn't, to avoid the fiddliest part of
-frameless-window work - see the plan doc). Minimizing/closing both go to
-the system tray instead of exiting, so the app stays reachable without
-needing to be relaunched.
+real. A frameless window (Qt.FramelessWindowHint) has no native
+edge/corner resize grips at all - TitleBar already works around the
+equivalent problem for *moving* the window via QWindow.startSystemMove()
+(see title_bar.py); this window resizes itself with that same API's
+sibling, QWindow.startSystemResize(), via an application-wide event filter
+that detects a press within _RESIZE_MARGIN px of an edge (see
+eventFilter()/_resize_edges_at() below) - both hand the actual drag off to
+the OS once started, rather than this code tracking mouse movement itself.
+Minimizing/closing both go to the system tray instead of exiting, so the
+app stays reachable without needing to be relaunched.
 """
 from __future__ import annotations
 
 from typing import Optional
 
 from PyQt5.QtCore import QEvent, Qt
-from PyQt5.QtWidgets import QHBoxLayout, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QMainWindow,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ui.pages.cleanup_page import CleanupPage
 from ui.pages.dashboard_page import DashboardPage
@@ -27,6 +37,9 @@ from ui.tray import setup_tray
 
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 800
+MIN_WINDOW_WIDTH = 960
+MIN_WINDOW_HEIGHT = 600
+_RESIZE_MARGIN = 6  # px - how close to the window's edge counts as "grab to resize"
 
 # (page_id, icon_name, tooltip) - the sidebar's pages.
 _PAGES = [
@@ -45,7 +58,19 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setWindowTitle("Memory Master")
+        self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
+
+        # App-wide, not just on self: a mouse press near the edge almost
+        # always lands on some child widget (the results table, sidebar,
+        # etc. all extend flush to the window's edges), and per-widget
+        # event filters/overrides only ever see events already routed to
+        # that specific widget - installing on the QApplication instead
+        # means this sees every press before any widget does, regardless
+        # of which one the OS would otherwise have delivered it to.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
         root = QWidget(self)
         root.setObjectName("RootBackground")
@@ -107,6 +132,59 @@ class MainWindow(QMainWindow):
         if index is not None:
             self._stack.setCurrentIndex(index)
             self._sidebar.set_current(page_id)
+
+    def eventFilter(self, watched, event) -> bool:
+        if (
+            event.type() == QEvent.MouseButtonPress
+            and event.button() == Qt.LeftButton
+            and not self.isMaximized()
+            and isinstance(watched, QWidget)
+            and watched.window() is self
+        ):
+            # watched.window() is self: only react to presses on a widget
+            # that's actually part of *this* window's own tree - an
+            # app-wide filter also sees events for every other top-level
+            # window (dialogs, popups, menus), which must never trigger a
+            # resize of this one just because their screen position happens
+            # to overlap it.
+            edges = self._resize_edges_at(event.globalPos())
+            if edges is not None:
+                handle = self.windowHandle()
+                if handle is not None:
+                    handle.startSystemResize(edges)
+                    return True
+        return super().eventFilter(watched, event)
+
+    def _resize_edges_at(self, global_pos):
+        """Qt.Edges the given global screen position is within
+        _RESIZE_MARGIN of, or None if it's not near any edge of this
+        window. Works from global (screen) coordinates rather than any
+        child widget's own local ones, since the child under the cursor at
+        the true window edge could be anything (the results table, a
+        button, ...) - none of them need to cooperate or leave a margin for
+        this to still correctly detect "near this window's actual edge".
+        """
+        local = self.mapFromGlobal(global_pos)
+        if not self.rect().contains(local):
+            return None  # belongs to a different top-level window
+
+        left = local.x() <= _RESIZE_MARGIN
+        right = local.x() >= self.width() - _RESIZE_MARGIN
+        top = local.y() <= _RESIZE_MARGIN
+        bottom = local.y() >= self.height() - _RESIZE_MARGIN
+        if not (left or right or top or bottom):
+            return None
+
+        edges = Qt.Edges()
+        if left:
+            edges |= Qt.LeftEdge
+        if right:
+            edges |= Qt.RightEdge
+        if top:
+            edges |= Qt.TopEdge
+        if bottom:
+            edges |= Qt.BottomEdge
+        return edges
 
     def _toggle_maximize(self) -> None:
         if self.isMaximized():
