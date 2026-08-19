@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import send2trash
 
+from core.ownership import clear_readonly
 from core.path_guard import is_protected
 
 
@@ -29,9 +30,25 @@ def send_to_trash(path: str) -> TrashResult:
     try:
         send2trash.send2trash(path)
         return TrashResult(True)
-    except Exception as e:
-        # send2trash's exception types vary by platform/backend (unlike
-        # e.g. shutil.move's plain OSError) - a broad catch is the only
-        # reliable way to turn "trash failed" into a TrashResult instead of
-        # an unhandled exception reaching the UI thread.
-        return TrashResult(False, str(e))
+    except Exception as first_error:
+        # A leftover file from an installed app - the common case now
+        # that is_protected() lets a real descendant of C:\ProgramData or
+        # C:\Windows\Installer through - is often just marked read-only,
+        # not genuinely inaccessible. Clear that and retry once before
+        # giving up; clear_readonly() itself already fails harmlessly off
+        # Windows (no attrib.exe to run), so no platform check is needed
+        # here, matching how force_delete.py's own retry calls it
+        # unconditionally too. Deliberately NOT also taking ownership here
+        # (core/force_delete.py's heavier retry does that) - this module's
+        # own docstring scopes it to the simple path, with "강제 삭제"
+        # as the documented next step for whatever still resists it.
+        clear_readonly(path)
+        try:
+            send2trash.send2trash(path)
+            return TrashResult(True)
+        except Exception as second_error:
+            # send2trash's exception types vary by platform/backend (unlike
+            # e.g. shutil.move's plain OSError) - a broad catch is the only
+            # reliable way to turn "trash failed" into a TrashResult
+            # instead of an unhandled exception reaching the UI thread.
+            return TrashResult(False, str(second_error))

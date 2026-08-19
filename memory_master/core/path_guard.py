@@ -5,6 +5,24 @@ Refuses to touch core Windows install locations, or any *ancestor* of one
 extra depth under a user-profile root so a whole C:\\Users\\<name> can't be
 wiped out as a side effect of a generic "shallow path" rule.
 
+Most protected roots are fully protected: neither the root nor anything
+under it may ever be deleted, no exceptions (FULLY_PROTECTED_ROOTS). Two
+roots - C:\\ProgramData and C:\\Windows\\Installer - are "contents-allowed"
+instead (CONTENTS_ALLOWED_ROOTS): the root folder itself still can't be
+deleted (wiping either one outright is still too destructive - antivirus
+databases, driver packages, and other genuinely-needed state live directly
+under both), but a real file/subfolder inside one - an installed app's own
+leftover residue, the common actual complaint - can be targeted, letting
+core/force_delete.py's existing read-only-clear/take-ownership retry logic
+actually get a chance to run instead of being refused outright before ever
+trying. This carve-out only applies to these two specific roots - a target
+under C:\\Windows but *not* under C:\\Windows\\Installer (System32, WinSxS,
+Temp, ...) stays fully protected exactly as before, so the precedence
+between the two categories matters: see _check_single's contents-allowed
+check running before (and short-circuiting past) the fully-protected one,
+since C:\\Windows\\Installer is itself a subpath of the fully-protected
+C:\\Windows.
+
 Deliberately uses `ntpath` (Windows path semantics) rather than the
 platform-dependent `os.path` throughout, since these are always Windows-
 style paths regardless of what OS this code happens to run on - `os.path`
@@ -40,15 +58,15 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
-def _protected_roots() -> List[str]:
-    """Concrete protected paths. The System32/pagefile.sys/bootmgr entries
-    were confirmed useful from a reference implementation; the surrounding
+def _fully_protected_roots() -> List[str]:
+    """Concrete paths where neither the root nor anything under it may
+    ever be deleted. The System32/pagefile.sys/bootmgr entries were
+    confirmed useful from a reference implementation; the surrounding
     ancestor/depth logic is this module's own, applied on top of them.
     """
     system_root = _env("SystemRoot", r"C:\Windows")
     program_files = _env("ProgramFiles", r"C:\Program Files")
     program_files_x86 = _env("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    program_data = _env("ProgramData", r"C:\ProgramData")
     system_drive = _env("SystemDrive", "C:") + "\\"
 
     roots = [
@@ -56,7 +74,6 @@ def _protected_roots() -> List[str]:
         ntpath.join(system_root, "System32"),
         program_files,
         program_files_x86,
-        program_data,
         # Deliberately NOT the bare drive root itself (e.g. "C:\") here:
         # is_within_or_equal() treats "under this root" as protected, and
         # every path on the drive is trivially under its own root - that
@@ -77,7 +94,23 @@ def _protected_roots() -> List[str]:
     return roots
 
 
-PROTECTED_ROOTS = _protected_roots()
+def _contents_allowed_roots() -> List[str]:
+    """Roots where the folder itself is refused but a real descendant may
+    be targeted - see this module's docstring for why these two
+    specifically, and why the precedence against _fully_protected_roots()
+    matters (C:\\Windows\\Installer is itself a subpath of the fully-
+    protected C:\\Windows).
+    """
+    system_root = _env("SystemRoot", r"C:\Windows")
+    program_data = _env("ProgramData", r"C:\ProgramData")
+    return [
+        program_data,
+        ntpath.join(system_root, "Installer"),
+    ]
+
+
+FULLY_PROTECTED_ROOTS = _fully_protected_roots()
+CONTENTS_ALLOWED_ROOTS = _contents_allowed_roots()
 
 
 def is_within_or_equal(path: str, other: str) -> bool:
@@ -103,10 +136,34 @@ def _is_user_profile_subpath(path: PureWindowsPath) -> bool:
     return len(parts) >= 2 and parts[1].lower() == "users"
 
 
+def _check_depth(norm_target: PureWindowsPath) -> Tuple[bool, str]:
+    depth = _depth_below_root(norm_target)
+    if _is_user_profile_subpath(norm_target):
+        if depth < USER_PROFILE_MIN_DEPTH:
+            return True, "사용자 프로필 폴더 전체는 삭제할 수 없습니다."
+    elif depth < MIN_PATH_DEPTH:
+        return True, "드라이브 루트에 너무 가까운 경로는 삭제할 수 없습니다."
+    return False, ""
+
+
 def _check_single(abs_target: str) -> Tuple[bool, str]:
     norm_target = _normalize(abs_target)
 
-    for root in PROTECTED_ROOTS:
+    # Checked first, and short-circuits past the fully-protected loop
+    # below when it matches a real descendant: C:\Windows\Installer is
+    # itself a subpath of the fully-protected C:\Windows, so without this
+    # running first, that loop's C:\Windows match would refuse an
+    # Installer descendant before this carve-out ever got a say.
+    for root in CONTENTS_ALLOWED_ROOTS:
+        if not root:
+            continue
+        norm_root = _normalize(ntpath.abspath(root))
+        if norm_target == norm_root:
+            return True, f"이 폴더 자체는 삭제할 수 없습니다({root}) - 안의 개별 파일/폴더만 삭제할 수 있습니다."
+        if norm_root in norm_target.parents:
+            return _check_depth(norm_target)
+
+    for root in FULLY_PROTECTED_ROOTS:
         if not root:
             continue
         if is_within_or_equal(abs_target, root):
@@ -115,14 +172,7 @@ def _check_single(abs_target: str) -> Tuple[bool, str]:
         if norm_target in norm_root.parents:
             return True, f"핵심 시스템 경로({root})의 상위 폴더입니다."
 
-    depth = _depth_below_root(norm_target)
-    if _is_user_profile_subpath(norm_target):
-        if depth < USER_PROFILE_MIN_DEPTH:
-            return True, "사용자 프로필 폴더 전체는 삭제할 수 없습니다."
-    elif depth < MIN_PATH_DEPTH:
-        return True, "드라이브 루트에 너무 가까운 경로는 삭제할 수 없습니다."
-
-    return False, ""
+    return _check_depth(norm_target)
 
 
 def is_protected(target: str) -> Tuple[bool, str]:

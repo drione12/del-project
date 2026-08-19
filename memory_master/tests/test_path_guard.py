@@ -70,6 +70,41 @@ def test_normal_deep_non_user_path_is_allowed():
     assert not blocked
 
 
+def test_programdata_itself_is_protected():
+    blocked, reason = path_guard.is_protected(r"C:\ProgramData")
+    assert blocked
+    assert "자체" in reason
+
+
+def test_programdata_residual_file_is_allowed():
+    # The actual carve-out this app's user asked for: an installed app's
+    # leftover file inside ProgramData should reach force_delete.py's
+    # existing retry logic instead of being refused outright.
+    blocked, _ = path_guard.is_protected(r"C:\ProgramData\SomeVendor\residual.tmp")
+    assert not blocked
+
+
+def test_windows_installer_itself_is_still_protected():
+    blocked, reason = path_guard.is_protected(r"C:\Windows\Installer")
+    assert blocked
+    assert "자체" in reason
+
+
+def test_windows_installer_content_is_allowed():
+    blocked, _ = path_guard.is_protected(r"C:\Windows\Installer\{GUID}\file.msi")
+    assert not blocked
+
+
+def test_windows_installer_carveout_does_not_leak_to_other_windows_subfolders():
+    # The carve-out is specifically scoped to Installer - every other
+    # C:\Windows subfolder (System32 already covered above, but also any
+    # other one) must stay exactly as fully protected as before.
+    blocked, _ = path_guard.is_protected(r"C:\Windows\Temp\something")
+    assert blocked
+    blocked, _ = path_guard.is_protected(r"C:\Windows\WinSxS\some_component")
+    assert blocked
+
+
 def test_is_within_or_equal_true_for_descendant():
     assert path_guard.is_within_or_equal(r"C:\Windows\System32\foo.dll", r"C:\Windows")
 
