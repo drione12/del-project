@@ -27,6 +27,17 @@ QFrame[role="card"] {
     border-radius: 8px;
 }
 
+/* QDialog also matches QMessageBox and every custom QDialog subclass
+   (ConfirmForceDeleteDialog, etc.) - Qt QSS class selectors match
+   subclasses too. Without this, a dialog falls back to Qt's platform-
+   default (light) background, and the QLabel rule above (light text,
+   correct for this app's own dark backgrounds) becomes unreadable light-
+   on-light instead. QPushButton is already styled globally further down,
+   so dialog buttons don't need their own rule here. */
+QDialog {
+    background-color: #1a202c;
+}
+
 QToolButton#TitleBarButton {
     background-color: transparent;
     border: none;

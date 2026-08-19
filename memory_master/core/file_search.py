@@ -165,6 +165,16 @@ _VIDEO_EXTENSIONS = frozenset({
 CATEGORIES = ("all", "music", "archive", "document", "executable", "folder", "image", "video")
 
 
+def is_video_file(path: str) -> bool:
+    """Path-based (not FileEntry-based) sibling of matches_category's own
+    "video" branch, for callers that only have a plain path string - the
+    search page's preview panel, which decides whether to try extracting a
+    thumbnail frame. Reuses the same _VIDEO_EXTENSIONS set rather than a
+    second, independently-maintained list that could drift out of sync.
+    """
+    return os.path.splitext(path)[1].lstrip(".").lower() in _VIDEO_EXTENSIONS
+
+
 def matches_category(entry: FileEntry, category: str) -> bool:
     """category must be one of CATEGORIES. "all" and "folder" need no
     extension lookup (folder is attribute-based, like every other category

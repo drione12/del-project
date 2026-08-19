@@ -35,6 +35,15 @@ QFrame[role="card"] {
     border-radius: 8px;
 }
 
+/* Light theme's own default dialog background already has correct
+   contrast against the QLabel rule above (dark text), unlike the dark
+   theme - this is purely for visual consistency (a plain white card look
+   instead of falling back to Qt's platform-default dialog chrome). */
+QDialog {
+    background-color: #ffffff;
+    border: 1px solid #e2e6ec;
+}
+
 QToolButton#TitleBarButton {
     background-color: transparent;
     border: none;

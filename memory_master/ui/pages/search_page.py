@@ -36,7 +36,7 @@ from typing import Callable, List, Optional, Tuple
 
 import psutil
 from PyQt5.QtCore import QAbstractTableModel, QModelIndex, QThread, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QIcon, QPixmap
+from PyQt5.QtGui import QIcon, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -60,7 +60,7 @@ from PyQt5.QtWidgets import (
 from core.elevation import is_running_as_admin, request_admin_restart
 from core.fast_search import FastSearchEngine
 from core.fast_search import is_available as fast_search_available
-from core.file_search import CATEGORIES, FileEntry, build_index, matches_category
+from core.file_search import CATEGORIES, FileEntry, build_index, is_video_file, matches_category
 from core.file_search import search as search_entries
 from core.force_delete import AnalyzeResult, ExecuteOptions, ExecuteResult, execute
 from core.formatting import format_attributes, format_bytes, format_datetime, format_extension
@@ -89,7 +89,9 @@ _COL_ATTRIBUTES = 7
 
 _MAX_DISPLAYED_RESULTS = 2000
 _SEARCH_DEBOUNCE_MS = 250
-_PREVIEW_PLACEHOLDER_TEXT = "이미지를 선택하면\n미리보기가 표시됩니다"
+_PREVIEW_PLACEHOLDER_TEXT = "이미지나 동영상을 선택하면\n미리보기가 표시됩니다"
+_PREVIEW_LOADING_TEXT = "미리보기 불러오는 중..."
+_PREVIEW_VIDEO_FAILED_TEXT = "미리보기를 불러올 수 없습니다"
 
 # (category, label) pairs for the category filter dropdown, in display
 # order - same categories/order as CATEGORIES (core/file_search.py) and the
@@ -276,6 +278,70 @@ class _PreviewLabel(QLabel):
         self.setPixmap(self._original.scaled(box, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
 
+def _extract_video_thumbnail(path: str) -> QPixmap:
+    """First-frame thumbnail via OpenCV (already a dependency -
+    core/image_scanner.py's ORB duplicate-image matching uses the same
+    cv2 family) - QPixmap/QImageReader can't decode video containers at
+    all, so this is the lightest way to get *something* to show for a
+    video in the same preview panel images already use. Returns a null
+    QPixmap if the file can't be opened/decoded (corrupt file, a codec
+    OpenCV doesn't support, ...) - same "null = show a placeholder
+    instead" convention the image path already relies on. Runs on a
+    background thread (see _VideoThumbnailWorker) - opening a video
+    container and decoding a frame is meaningfully slower than a plain
+    image load, and unlike that already-synchronous path, doing this on
+    the UI thread would freeze selection/browsing.
+    """
+    import cv2
+
+    cap = cv2.VideoCapture(path)
+    try:
+        if not cap.isOpened():
+            return QPixmap()
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            return QPixmap()
+    finally:
+        cap.release()
+
+    # BGR (OpenCV's native channel order) -> RGB (what QImage expects) -
+    # skipping this wouldn't crash, just silently swap red and blue.
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    height, width, _channels = frame.shape
+    bytes_per_line = 3 * width
+    # .copy(): QImage wraps the raw buffer it's given rather than owning
+    # it - without a copy, `frame` (this function's local numpy array)
+    # could be garbage-collected while the QImage/QPixmap built from it is
+    # still in use elsewhere, a real dangling-buffer risk, not a
+    # theoretical one.
+    image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
+    return QPixmap.fromImage(image)
+
+
+class _VideoThumbnailWorker(QThread):
+    """Runs _extract_video_thumbnail() off the UI thread. generation is
+    echoed back unchanged, same reasoning as _SearchWorker's - the user
+    can click through several videos before an earlier extraction
+    finishes, and a slow one finishing last must not clobber whatever's
+    actually selected by then.
+    """
+
+    thumbnailReady = pyqtSignal(QPixmap, int)  # possibly-null pixmap, generation
+
+    def __init__(self, path: str, generation: int, parent=None):
+        super().__init__(parent)
+        self._path = path
+        self._generation = generation
+
+    def run(self) -> None:
+        try:
+            pixmap = _extract_video_thumbnail(self._path)
+        except Exception:
+            logger.exception("video thumbnail extraction failed for %s", self._path)
+            pixmap = QPixmap()
+        self.thumbnailReady.emit(pixmap, self._generation)
+
+
 class _SearchWorker(QThread):
     """Runs one search off the UI thread so a slow query (large index, or
     the slow os.walk-backed fallback) can't freeze typing/scrolling.
@@ -422,6 +488,8 @@ class SearchPage(QWidget):
         self._worker: Optional[QThread] = None  # one at a time, mirrors CleanupPage
         self._search_worker: Optional[QThread] = None  # separate slot: can overlap self._worker
         self._search_generation = 0  # bumped per _apply_search() call; discards stale results
+        self._video_thumbnail_worker: Optional[QThread] = None  # separate slot: can overlap either worker above
+        self._preview_generation = 0  # bumped per _update_preview() call; discards stale thumbnails
         self._auto_indexed = False  # first showEvent kicks off indexing, not __init__
         self._active_category = "all"
         self._fast_engine: Optional[FastSearchEngine] = self._create_fast_engine()
@@ -744,14 +812,38 @@ class SearchPage(QWidget):
     # -- image preview --------------------------------------------------
 
     def _update_preview(self) -> None:
+        self._preview_generation += 1
+        generation = self._preview_generation
         entries = self._selected_entries()
-        if len(entries) == 1 and not entries[0].is_dir and is_image_file(entries[0].path):
-            pixmap = QPixmap(entries[0].path)
-            if not pixmap.isNull():
-                self._preview_label.set_original_pixmap(pixmap)
+
+        if len(entries) == 1 and not entries[0].is_dir:
+            path = entries[0].path
+            if is_image_file(path):
+                pixmap = QPixmap(path)
+                if not pixmap.isNull():
+                    self._preview_label.set_original_pixmap(pixmap)
+                    return
+            elif is_video_file(path):
+                self._preview_label.clear_pixmap()
+                self._preview_label.setText(_PREVIEW_LOADING_TEXT)
+                worker = _VideoThumbnailWorker(path, generation, self)
+                worker.thumbnailReady.connect(self._on_video_thumbnail_ready)
+                worker.finished.connect(worker.deleteLater)
+                self._video_thumbnail_worker = worker
+                worker.start()
                 return
+
         self._preview_label.clear_pixmap()
         self._preview_label.setText(_PREVIEW_PLACEHOLDER_TEXT)
+
+    def _on_video_thumbnail_ready(self, pixmap: QPixmap, generation: int) -> None:
+        if generation != self._preview_generation:
+            return  # a newer selection superseded this one
+        if not pixmap.isNull():
+            self._preview_label.set_original_pixmap(pixmap)
+        else:
+            self._preview_label.clear_pixmap()
+            self._preview_label.setText(_PREVIEW_VIDEO_FAILED_TEXT)
 
     # -- Del key / context menu --------------------------------------------
 
@@ -960,25 +1052,30 @@ class SearchPage(QWidget):
             return True
 
     def stop(self) -> None:
-        """Cancels/waits for any in-flight index/delete worker and any
-        in-flight search worker, then closes the fast engine if one was
-        created - same reasoning as before this class ever touched a DLL
-        (destroying a live QThread is undefined behavior in Qt), but closing
-        the fast engine adds a sharper failure mode than a merely-orphaned
-        QThread: closing it while a _FastIndexWorker's EC_BuildIndex call or
-        a _SearchWorker's engine.search() call is *still running* on another
-        thread would free state that call is still touching - a real C++
-        use-after-free, not just Python/Qt object churn. So the fast engine
-        is only closed once *both* workers are confirmed stopped. If either
-        wait() times out, the fast engine (and its background USN-watcher
-        threads) is deliberately left to leak for the rest of this
-        process's life rather than risk that - safe, since this only ever
-        runs from aboutToQuit, i.e. the process is exiting anyway.
+        """Cancels/waits for any in-flight index/delete worker, search
+        worker, and video-thumbnail worker, then closes the fast engine if
+        one was created - same reasoning as before this class ever touched
+        a DLL (destroying a live QThread is undefined behavior in Qt), but
+        closing the fast engine adds a sharper failure mode than a merely-
+        orphaned QThread: closing it while a _FastIndexWorker's
+        EC_BuildIndex call or a _SearchWorker's engine.search() call is
+        *still running* on another thread would free state that call is
+        still touching - a real C++ use-after-free, not just Python/Qt
+        object churn. So the fast engine is only closed once *every*
+        worker is confirmed stopped (the video-thumbnail worker never
+        touches the fast engine itself, but is included for the same
+        blanket "no QThread this class owns may still be running when the
+        process tears down" reasoning). If any wait() times out, the fast
+        engine (and its background USN-watcher threads) is deliberately
+        left to leak for the rest of this process's life rather than risk
+        that - safe, since this only ever runs from aboutToQuit, i.e. the
+        process is exiting anyway.
         """
         worker_stopped = self._wait_for_worker(self._worker)
         search_worker_stopped = self._wait_for_worker(self._search_worker)
+        video_worker_stopped = self._wait_for_worker(self._video_thumbnail_worker)
 
-        if self._fast_engine is not None and worker_stopped and search_worker_stopped:
+        if self._fast_engine is not None and worker_stopped and search_worker_stopped and video_worker_stopped:
             self._fast_engine.save_indexes()
             self._fast_engine.close()
 
