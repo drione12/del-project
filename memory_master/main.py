@@ -11,8 +11,30 @@ from PyQt5.QtCore import Qt  # noqa: E402
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
 from core.config import load_config  # noqa: E402
+from core.logging_setup import get_logger  # noqa: E402
 from core.resource_path import resource_path  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
+
+logger = get_logger(__name__)
+
+
+def _install_crash_logging() -> None:
+    """The packaged build runs with --windowed (see
+    build-memory-master.yml) - there's no console, so an uncaught
+    exception's default traceback (sys.__excepthook__, which prints to
+    stderr) goes nowhere and the app just silently disappears, with zero
+    diagnostic information left behind. Routing it through the same
+    rotating file logger every other unexpected-but-handled failure in this
+    app already uses (core/logging_setup.py) means a future crash at least
+    leaves a trace in %LOCALAPPDATA%\\MemoryMaster\\logs\\memory_master.log.
+    """
+    default_hook = sys.excepthook
+
+    def _hook(exc_type, exc_value, exc_tb):
+        logger.critical("unhandled exception", exc_info=(exc_type, exc_value, exc_tb))
+        default_hook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _hook
 
 
 def _load_stylesheet(theme: str) -> str:
@@ -35,6 +57,7 @@ def _parse_args(argv: list) -> argparse.Namespace:
 
 
 def main() -> int:
+    _install_crash_logging()
     config = load_config()
     args = _parse_args(sys.argv[1:])
 

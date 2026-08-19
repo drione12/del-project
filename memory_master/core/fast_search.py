@@ -83,9 +83,26 @@ class FastSearchEngine:
         import ctypes
 
         self._lock = threading.Lock()
-        self._dll = ctypes.WinDLL(resource_path("EverythingCore.dll"))
+        # CDLL, not WinDLL: src/core_api.h's EC_API macro is a plain
+        # `extern "C" __declspec(dllexport)` with no __stdcall/WINAPI, so
+        # every export uses the default MSVC __cdecl convention - WinDLL
+        # assumes __stdcall (caller-does-not-clean-the-stack) instead, which
+        # is only harmless by accident on x64 (where the two conventions
+        # compile identically); on any x86 build it silently corrupts the
+        # stack on every call, a real access-violation/crash risk.
+        self._dll = ctypes.CDLL(resource_path("EverythingCore.dll"))
         self._bind_functions()
         self._handle = self._dll.EC_Create()
+        if not self._handle:
+            # Extremely unlikely (EC_Create is just `new EC_State()`), but a
+            # NULL handle here would otherwise flow straight into every
+            # other EC_* call as a raw NULL pointer argument - core_api.cpp
+            # itself null-checks defensively, so today that's not a crash,
+            # but there's no reason to rely on every future call site
+            # continuing to do so. Raising OSError here reuses
+            # _create_fast_engine()'s existing except OSError fallback to
+            # the slow backend instead of adding a new error path.
+            raise OSError("EC_Create returned a NULL handle")
 
     def _bind_functions(self) -> None:
         import ctypes

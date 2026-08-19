@@ -64,9 +64,12 @@ from core.file_search import search as search_entries
 from core.force_delete import AnalyzeResult, ExecuteOptions, ExecuteResult, execute
 from core.formatting import format_attributes, format_bytes, format_datetime, format_extension
 from core.image_scanner import is_image_file
+from core.logging_setup import get_logger
 from core.trash import send_to_trash
 from core.workers import AnalyzeWorker, ExecuteWorker
 from ui.dialogs.confirm_force_delete import ConfirmForceDeleteDialog
+
+logger = get_logger(__name__)
 
 if sys.platform == "win32":
     from core.icons import get_icon_for_path
@@ -253,7 +256,23 @@ class _SearchWorker(QThread):
         self._generation = generation
 
     def run(self) -> None:
-        results, status_text = self._search_fn()
+        try:
+            results, status_text = self._search_fn()
+        except Exception:
+            # Must never let an exception escape a QThread.run() override -
+            # there's no Python call stack on the other side of this call
+            # for it to propagate into (Qt's C++ side invokes this
+            # directly), so PyQt5 can silently abort the whole process
+            # instead of raising anything catchable - and under a
+            # PyInstaller --windowed build there's no console for even a
+            # printed traceback to appear on, so it looks like the app just
+            # vanished. Logging it here means a future failure at least
+            # leaves a trace in
+            # %LOCALAPPDATA%\MemoryMaster\logs\memory_master.log (see
+            # core/logging_setup.py) instead of zero diagnostic information.
+            logger.exception("search failed")
+            self.resultReady.emit([], "검색 중 오류가 발생했습니다", self._generation)
+            return
         self.resultReady.emit(results, status_text, self._generation)
 
 
@@ -297,7 +316,16 @@ class _FastIndexWorker(QThread):
         self._engine = engine
 
     def run(self) -> None:
-        self.resultReady.emit(self._engine.build_index())
+        try:
+            count = self._engine.build_index()
+        except Exception:
+            # Same reasoning as _SearchWorker.run() above - never let an
+            # exception escape this override. Reports 0, which
+            # _on_fast_index_ready already treats as "인덱싱 실패" - no new
+            # error-display path needed.
+            logger.exception("build_index failed")
+            count = 0
+        self.resultReady.emit(count)
 
 
 class _TrashDeleteWorker(QThread):

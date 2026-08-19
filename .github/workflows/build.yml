@@ -15,8 +15,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # -A x64: the Visual Studio generator defaults to Win32 (x86) when no
+      # -A is given, even on a 64-bit runner - EverythingCore.dll needs to
+      # match the bitness of whatever process loads it via ctypes (Memory
+      # Master's PyInstaller build, which actions/setup-python's default x64
+      # Python makes 64-bit - see build-memory-master.yml). Building x86
+      # here too, not just there, keeps this workflow's own
+      # EverythingClone.exe/EverythingCore.dll artifacts consistent with
+      # what package job actually ships.
       - name: Configure
-        run: cmake -B build
+        run: cmake -B build -A x64
 
       - name: Build
         run: cmake --build build --config Release

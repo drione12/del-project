@@ -45,8 +45,16 @@ jobs:
       # everything in CMakeLists.txt), which Memory Master itself no longer
       # uses - left as-is for simplicity rather than adding a --target flag
       # to skip it, since it's a small extra build cost, not a bundled one.
+      # -A x64: the Visual Studio generator defaults to Win32 (x86) when no
+      # -A is given, even on a 64-bit runner. Without this,
+      # EverythingCore.dll ends up 32-bit while actions/setup-python's
+      # default x64 Python (below) makes MemoryMaster.exe 64-bit -
+      # ctypes.WinDLL/CDLL cannot load a DLL of a different bitness than the
+      # calling process at all (LoadLibrary fails outright), so this
+      # mismatch silently disabled fast search (fell back to the slow
+      # os.walk backend) in every previously-shipped build.
       - name: Configure
-        run: cmake -B build
+        run: cmake -B build -A x64
 
       - name: Build
         run: cmake --build build --config Release
