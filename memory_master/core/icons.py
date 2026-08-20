@@ -7,7 +7,7 @@ its own embedded icon instead of a generic one. Windows-only
 can't be imported or exercised on this Linux dev environment - only
 syntax-checked via py_compile. Callers on non-Windows platforms must not
 import this module at all (see its sys.platform-guarded import in
-ui/pages/dashboard_page.py and friends).
+ui/pages/search_page.py, which falls back to a no-op stub off Windows).
 """
 from __future__ import annotations
 

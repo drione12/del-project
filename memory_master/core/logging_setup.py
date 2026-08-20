@@ -1,9 +1,12 @@
 """Shared rotating-file logger, used in place of bare print()/silent
-exception-swallowing across the app. The dashboard's process iteration,
-the optimizer, and - once built - the force-delete pipeline and blacklist
-watchdog all hit the same class of expected-but-noteworthy failure: a
-process that exited mid-scan, a file Windows won't let go of. Logging it
-beats losing it silently and beats crashing the UI over it.
+exception-swallowing across the app. The force-delete pipeline, the search
+page's background workers, and the startup-manager scan all hit the same
+class of expected-but-noteworthy failure: a process that exited mid-scan, a
+file Windows won't let go of, a video frame that won't decode. Logging it
+beats losing it silently and beats crashing the UI over it - and in a
+packaged --windowed build (no console) this file is the only place such a
+failure leaves any trace at all, so main.py routes even uncaught
+exceptions here via sys.excepthook.
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 # Memory Master
 
-Windows 전용 시스템 대시보드 + 강제 삭제/정리 도구. 이 저장소의 `src/`(Everything 클론,
+Windows 전용 파일 검색 + 강제 삭제/정리 도구. 이 저장소의 `src/`(Everything 클론,
 C++/Win32)와는 별도의 Python/PyQt5 앱으로, 대부분의 기능은 코드를 공유하지 않고 빌드/CI도
 따로 돕니다 — 다만 파일 검색 페이지만은 예외로, 관리자 권한으로 실행 중이면 `src/`의 검색
 엔진을 `EverythingCore.dll`(`core_api.h`가 감싼 raw NTFS MFT 인덱스 + USN 저널 실시간
@@ -10,14 +10,17 @@ C++/Win32)와는 별도의 Python/PyQt5 앱으로, 대부분의 기능은 코드
 
 ## 왜 별도 앱인가
 
-목업 디자인(둥근 카드, 원형 게이지, 그라디언트)을 제대로 구현하려면 커스텀 그리기가
+목업 디자인(둥근 카드, 그라디언트, 커스텀 타이틀 바)을 제대로 구현하려면 커스텀 그리기가
 많이 필요한데, Qt(QPainter + QSS)가 raw Win32 GDI보다 훨씬 적합하고 검증된 방법입니다.
 
-## 기능 (사이드바 5개 아이콘)
+## 기능 (사이드바 4개 아이콘)
 
-- **대시보드** — RAM 원형 게이지, CPU/디스크/네트워크 현황, RAM/CPU/Swap 추이 및 항목별
-  비교 타일, RAM+Swap 웨이브 차트, 메모리 할당(사용 중/대기/압축/여유) 바, Quick Actions
-  (RAM 최적화, 캐시 정리, 프로세스 상세), 상위 프로세스 목록.
+원래는 RAM 게이지/CPU·Swap 추이/메모리 할당/상위 프로세스를 보여주는 **대시보드** 페이지가
+맨 위에 하나 더 있었지만, 사용자 요청으로 페이지와 그 전용 코드(`core/metrics.py`,
+`core/optimizer.py`, `core/memory_allocation.py`, 게이지/차트 위젯 등)를 전부 제거했습니다.
+강제 삭제 파이프라인이 쓰는 `core/critical_processes.py`·`core/processes.py`와 시작 프로그램
+페이지가 쓰는 `core/system_health.py`·`widgets/status_pill.py`는 계속 씁니다.
+
 - **정리** — 중복 파일 찾기(MD5), 중복/유사 이미지 찾기(퍼셉추얼 해시 + OpenCV ORB로
   잘린/부분 일치까지 탐지, 폴더 여러 개 지정 가능), 검토 다이얼로그(미리보기 확대/축소,
   우선 유지 폴더 자동 선택), 파일/폴더를 끌어다 놓으면 강제 삭제 파이프라인으로 바로

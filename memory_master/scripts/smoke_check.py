@@ -24,7 +24,7 @@ def main() -> int:
     print("OK: MainWindow constructed and all pages built without error.")
 
     # QStackedWidget only delivers a real showEvent to whichever page is
-    # current, so the dashboard-only check above never exercises the
+    # current, so the default-page-only check above never exercises the
     # Search page's own showEvent-gated logic. A CI runner process is
     # never elevated, so this deterministically exercises the "not
     # elevated -> fallback view" branch for real - the embedded-view

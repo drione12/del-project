@@ -26,7 +26,6 @@ from PyQt5.QtWidgets import (
 )
 
 from ui.pages.cleanup_page import CleanupPage
-from ui.pages.dashboard_page import DashboardPage
 from ui.pages.placeholder_page import PlaceholderPage
 from ui.pages.search_page import SearchPage
 from ui.pages.settings_page import SettingsPage
@@ -41,14 +40,16 @@ MIN_WINDOW_WIDTH = 960
 MIN_WINDOW_HEIGHT = 600
 _RESIZE_MARGIN = 6  # px - how close to the window's edge counts as "grab to resize"
 
-# (page_id, icon_name, tooltip) - the sidebar's pages.
+# (page_id, icon_name, tooltip) - the sidebar's pages. The first entry is
+# also the default page on startup (see __init__'s go_to_page call).
 _PAGES = [
-    ("dashboard", "cpu", "대시보드"),
     ("cleanup", "cleanup", "정리"),
     ("search", "search", "파일 검색"),
     ("settings", "gear", "설정"),
     ("startup", "sliders", "시작 프로그램"),
 ]
+
+_DEFAULT_PAGE = _PAGES[0][0]
 
 _PLACEHOLDER_SUBTITLE = "곧 추가될 예정입니다."
 
@@ -106,7 +107,7 @@ class MainWindow(QMainWindow):
         self._tray = setup_tray(self)
         # Falls back to the default rather than silently doing nothing on
         # an invalid/garbage value (e.g. a malformed --start-page).
-        self.go_to_page(start_page if start_page in self._page_indices else "dashboard")
+        self.go_to_page(start_page if start_page in self._page_indices else _DEFAULT_PAGE)
 
     def _build_pages(self) -> None:
         for page_id, icon_name, tooltip in _PAGES:
@@ -115,8 +116,6 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _make_page(page_id: str, icon_name: str, tooltip: str) -> QWidget:
-        if page_id == "dashboard":
-            return DashboardPage()
         if page_id == "cleanup":
             return CleanupPage()
         if page_id == "search":
@@ -209,13 +208,15 @@ class MainWindow(QMainWindow):
             self._tray.showMessage("Memory Master", "백그라운드에서 계속 실행 중입니다.")
 
     def shutdown(self) -> None:
-        """Stops any background workers a page may have started (currently
-        just the dashboard's metrics poller). Called explicitly by the
-        offscreen smoke check, which never enters a real exec_() event
-        loop - the normally-running app instead stops workers via
-        DashboardPage's own QApplication.aboutToQuit connection, made when
-        the tray's exit action calls QApplication.quit() from inside
-        exec_().
+        """Stops any background workers a page may have started - the
+        Search page's index/search/thumbnail QThreads and its
+        EverythingCore.dll handle, the Cleanup page's scan workers, the
+        Startup Manager's scan thread. Called explicitly by the offscreen
+        smoke check, which never enters a real exec_() event loop - the
+        normally-running app instead stops workers via each page's own
+        QApplication.aboutToQuit connection (see SearchPage.__init__),
+        made when the tray's exit action calls QApplication.quit() from
+        inside exec_().
         """
         for i in range(self._stack.count()):
             page = self._stack.widget(i)

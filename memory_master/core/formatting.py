@@ -1,6 +1,6 @@
-"""Tiny byte/rate/datetime formatting helpers shared by the dashboard page,
-the process details dialog, and the search page - pure functions, no OS or
-Qt dependency, so they're trivially unit-testable.
+"""Tiny byte/rate/datetime formatting helpers used by the search page's
+results table (size/date/extension/attribute columns) - pure functions, no
+OS or Qt dependency, so they're trivially unit-testable.
 """
 from __future__ import annotations
 

@@ -1,7 +1,14 @@
-"""Maps a raw metric percentage to a severity tier, used to color the
-dashboard's status pills. Thresholds are deliberately conservative (90%+
-is "critical", not 95%+) since a system already thrashing at 90% used is a
-more useful early warning than waiting for it to be nearly pinned.
+"""Severity tiers and their labels/thresholds, backing widgets/status_pill.py
+(whose reserved status palette is keyed off Severity) - currently shown by
+the Startup Manager's boot-impact column. Thresholds are deliberately
+conservative (90%+ is "critical", not 95%+) since a system already
+thrashing at 90% used is a more useful early warning than waiting for it to
+be nearly pinned.
+
+severity_for_percent/overall_severity have no caller since the Dashboard
+page was removed; they're kept as the natural companion API to the Severity
+tiers this module exists to define (pure, tested, no OS/Qt dependency),
+rather than leaving a Severity enum with no way to derive one.
 """
 from __future__ import annotations
 
